@@ -1,0 +1,14 @@
+{
+  "name": "rehab-recovery-agent",
+  "version": "0.1.0",
+  "description": "Always-on AWS agent that organizes, reminds, tracks, and summarizes a prescribed physio program.",
+  "private": true,
+  "scripts": {
+    "seed": "node scripts/seed-program.mjs",
+    "verify": "node scripts/verify-data.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.700.0",
+    "@aws-sdk/lib-dynamodb": "^3.700.0"
+  }
+}
