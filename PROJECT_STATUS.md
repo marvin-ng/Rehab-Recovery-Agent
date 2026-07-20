@@ -107,6 +107,17 @@ sends must be to/from it, which matches the single-user design.
   `marvin.ngonadi@gmail.com` as both sender and recipient. No production-access request —
   this is a personal single-user tool; "therapist-ready" means formatted for Marvin to share
   himself, not an automated third-party send.
+- **D-5 (2026-07-20):** `Program` table redesigned from a static one-time load to a
+  versioned/status-tracked design (`status`: active/retired, `versionHistory`,
+  `retiredDate`/`retiredReason`, `progressedTo`/`progressedFrom`). Rationale: needed to support
+  real-world program changes — a new program from the physio, a single exercise progressing, or a
+  mid-program addition — without losing history. Changes are applied **manually**, not
+  auto-detected; adherence/asymmetry logic filters on `status = active` for "the current program."
+- **D-6 (2026-07-20):** Reporting boundary extended to **weekly AND monthly** summaries. The
+  monthly view may narrate trends (improving, plateauing, worsening) and prompt a physio
+  conversation, but reports the pattern only — never diagnoses or explains cause. Rationale: trend
+  narration was identified as the point most likely to blur the clinical boundary, so the rule was
+  made explicit rather than assumed covered by the original core boundary.
 
 ---
 
