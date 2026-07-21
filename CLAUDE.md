@@ -45,5 +45,8 @@ Same split as the previous Ticket Triage project: **Bedrock does judgment (taggi
 - Bundler must target node22 explicitly; local Node version is not the deploy target. Every Lambda's CloudFormation `Runtime` is `nodejs22.x`.
 - This file is living documentation. Update it as Phase 0 confirms environment details, and whenever reality diverges from the plan.
 
+## Known limitations
+- Email delivery confirmed working but not guaranteed to land in inbox — currently lands in spam due to no sender reputation/DKIM on the bare-address SES identity. See PROJECT_STATUS.md for full detail. Domain verification with DKIM would be the real fix, out of scope for this build.
+
 ## Status
 See PROJECT_STATUS.md for phase findings, environment details, and decision log.

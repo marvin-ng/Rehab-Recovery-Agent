@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Rehab-Recovery-Agent Phase 4 — notify pipeline. Two Lambdas driven by
+  EventBridge Scheduler: rehab-nudge (daily missed-session check) and
+  rehab-digest (one handler, weekly + monthly cadence via distinct target input
+  payloads). Both email via SES from/to the single verified sandbox identity.
+  They REPORT patterns only; no clinical guidance is generated anywhere here.
+
+Resources:
+
+  # ---------- Nudge ----------
+  NudgeFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rehab-nudge-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: rehab-nudge-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadSessions
+                Effect: Allow
+                Action: dynamodb:Query
+                Resource: !ImportValue rehab-sessions-table-arn
+              - Sid: SendEmail
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/marvin.ngonadi@gmail.com
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rehab-nudge:*
+
+  NudgeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rehab-nudge
+      RetentionInDays: 30
+
+  NudgeFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: NudgeLogGroup
+    Properties:
+      FunctionName: rehab-nudge
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt NudgeFunctionRole.Arn
+      Code: ../dist/nudge/
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          SESSIONS_TABLE: !ImportValue rehab-sessions-table-name
+          EMAIL_IDENTITY: marvin.ngonadi@gmail.com
+      Tags:
+        - Key: project
+          Value: rehab-recovery-agent
+        - Key: phase
+          Value: "4"
+
+  # ---------- Digest ----------
+  DigestFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rehab-digest-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: rehab-digest-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadTables
+                Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !ImportValue rehab-sessions-table-arn
+                  - !ImportValue rehab-program-table-arn
+              - Sid: SendEmail
+                Effect: Allow
+                Action: ses:SendEmail
+                Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/marvin.ngonadi@gmail.com
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rehab-digest:*
+
+  DigestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rehab-digest
+      RetentionInDays: 30
+
+  DigestFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DigestLogGroup
+    Properties:
+      FunctionName: rehab-digest
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt DigestFunctionRole.Arn
+      Code: ../dist/digest/
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          SESSIONS_TABLE: !ImportValue rehab-sessions-table-name
+          PROGRAM_TABLE: !ImportValue rehab-program-table-name
+          EMAIL_IDENTITY: marvin.ngonadi@gmail.com
+      Tags:
+        - Key: project
+          Value: rehab-recovery-agent
+        - Key: phase
+          Value: "4"
+
+  # ---------- Scheduler execution role ----------
+  # EventBridge Scheduler assumes this to invoke the two Lambdas.
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rehab-scheduler-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: rehab-scheduler-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InvokeNotifyLambdas
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt NudgeFunction.Arn
+                  - !GetAtt DigestFunction.Arn
+
+  # ---------- Schedules ----------
+  NudgeSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: rehab-nudge-daily
+      Description: Daily missed-session nudge check, 07:00 ET.
+      State: ENABLED
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: cron(0 7 * * ? *)
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt NudgeFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+
+  WeeklyDigestSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: rehab-digest-weekly
+      Description: Weekly digest, Friday 07:00 ET.
+      State: ENABLED
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: cron(0 7 ? * FRI *)
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt DigestFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"digestType":"weekly"}'
+
+  MonthlyDigestSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: rehab-digest-monthly
+      Description: Monthly digest, 28th 07:00 ET (safe for all months).
+      State: ENABLED
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      ScheduleExpression: cron(0 7 28 * ? *)
+      ScheduleExpressionTimezone: America/New_York
+      Target:
+        Arn: !GetAtt DigestFunction.Arn
+        RoleArn: !GetAtt SchedulerInvokeRole.Arn
+        Input: '{"digestType":"monthly"}'
+
+Outputs:
+  NudgeFunctionName:
+    Value: !Ref NudgeFunction
+    Export:
+      Name: rehab-nudge-function-name
+  DigestFunctionName:
+    Value: !Ref DigestFunction
+    Export:
+      Name: rehab-digest-function-name

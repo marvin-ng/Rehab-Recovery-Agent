@@ -360,6 +360,133 @@ RESULT: all cases PASSED
 
 ---
 
+## Phase 4 — Wiring & notify ✅ COMPLETE (2026-07-21)
+**Deployed:** two raw-CloudFormation stacks (no SAM). `rehab-log-session` (Function URL + Lambda +
+scoped role, stack `rehab-log-session`) and `rehab-notify` (`rehab-nudge` + `rehab-digest` Lambdas,
+their roles, a Scheduler execution role, and 3 EventBridge Scheduler rules, stack `rehab-notify`).
+Three new bundles built with the same esbuild `--target=node22 --external:@aws-sdk/*` recipe as
+Phase 2. Shared modules `src/lib/ddb.mjs` (promoted DocumentClient) and `src/lib/email.mjs` (SESv2
+send, imported by both notify Lambdas). The generated Function URL:
+`https://6owlutqcgqvjnvbaenmywy2dgi0qvbjr.lambda-url.us-east-1.on.aws/`.
+
+### 0. Pre-flight IAM check — ✅ PASS
+`aws iam simulate-principal-policy --policy-source-arn arn:aws:iam::790561527138:user/Marv
+--action-names lambda:CreateFunctionUrlConfig lambda:InvokeFunctionUrl` → **both `allowed`** (reported
+even though it passed, per prior-phase discipline).
+
+### 1. log-session auth + validation + tagging + persistence — ✅ PASS
+Verified over the **real, anonymous HTTPS Function URL** (plain `curl`, no signing — the public path
+works after the §5 fix):
+- No `x-api-key` → `401 {"error":"unauthorized"}`.
+- Wrong `x-api-key` → `401 {"error":"unauthorized"}` (generic; does not reveal missing-vs-wrong).
+- Correct `x-api-key` + valid payload with a note (`"felt a sharp catch on the left, almost gave
+  way"`) → `200`. The handler invoked `rehab-tagging` Lambda-to-Lambda; the returned tag
+  `{symptomType:"pain", severity:"severe", flagForReview:true}` landed on the left side; the
+  empty-note right side got `tags:[]`. Item asserted present in `rehab-sessions`, then **deleted in
+  cleanup** (Count → 0). Insert/assert/delete discipline held; table left pristine.
+
+### 2. nudge — ✅ PASS (first real email send of the project)
+- **Should-nudge** (empty table): `{"nudged":true,"daysSinceLastSession":null}` — email **confirmed
+  delivered** to the account (located in Gmail's Spam folder, reclassified as not-spam; see D-24). Uses
+  the proven Phase 1 most-recent-session query (`ScanIndexForward:false, Limit:1`), not a trailing
+  window, so a gap of any length reports correctly.
+- **Should-not-nudge** (a session dated today): `{"nudged":false,"daysSinceLastSession":0}` — no email,
+  clean exit. Test session cleaned up (Count → 0).
+- **Actual nudge email content** (subject / body):
+  ```
+  Subject: Rehab check-in
+  No logged sessions yet. Your program calls for 3-4x/week.
+  ```
+  (When at least one session exists, the body is the numeric form:
+  `It's been {N} days since your last logged session. Your program calls for 3-4x/week.`)
+
+### 3. digest weekly + monthly — ✅ PASS
+Ran against 7 seeded sessions over 28 days (left-side moderate pain flags + improving ratings), then
+deleted all 7 (Count → 0). Lambda returns: weekly `{escalationCount:2, includedTrend:false}`, monthly
+`{escalationCount:2, includedTrend:true}`; bad `digestType` fails loud
+(`Error: invalid digestType: "quarterly"`). Both digest emails were **confirmed delivered** to the
+account (Gmail Spam, reclassified not-spam; see D-24). The **actual composed email bodies** (reproduced
+by running the deployed `composeBody` + the real Phase 3 logic modules against the identical seed and
+`asOfDate` 2026-07-21 — byte-for-byte what SES sent):
+
+```
+Subject: Weekly rehab summary
+Weekly rehab summary — as of 2026-07-21
+
+ADHERENCE
+Sessions logged in the last 7 days: 3 (target: 3-4/week).
+On target.
+
+FLAGS TO BRING UP WITH YOUR PHYSIO
+- Left side has been flagged for pain in 3 of your last 3 Single-Leg RDL sessions (most recent 2026-07-20). Worth asking your physio whether this needs attention.
+- Left side has shown moderate or higher pain in 4 of your last 7 Single-Leg RDL sessions. Worth asking your physio whether this needs attention.
+```
+
+```
+Subject: Monthly rehab summary
+Monthly rehab summary — as of 2026-07-21
+
+ADHERENCE
+Sessions logged in the last 7 days: 3 (target: 3-4/week).
+On target.
+
+FLAGS TO BRING UP WITH YOUR PHYSIO
+- Left side has been flagged for pain in 4 of your last 7 Single-Leg RDL sessions (most recent 2026-07-20). Worth asking your physio whether this needs attention.
+- Left side has shown moderate or higher pain in 4 of your last 7 Single-Leg RDL sessions. Worth asking your physio whether this needs attention.
+
+TREND (last two weeks vs the prior two)
+- painRating trended toward less pain over the last two weeks.
+- stiffnessRating trended toward less stiffness over the last two weeks.
+- confidenceRating trended toward higher confidence over the last two weeks.
+```
+Note the **weekly** symptom flag reads "3 of your last **3**" (7-day escalation scope) while
+**monthly** reads "4 of your last **7**" (30-day scope), and only monthly carries the TREND section —
+proving the dual-cadence escalation scoping (D-22) works. Boundary held: every line reports a pattern
+and hands a question to the physio; nothing diagnoses or explains *why*.
+
+### 4. EventBridge Scheduler rules — ✅ PASS (verified via `scheduler get-schedule`, not template trust)
+All three **ENABLED**, `FlexibleTimeWindow: OFF`, timezone `America/New_York`:
+| Name | Cron | Target | Input |
+|---|---|---|---|
+| `rehab-nudge-daily` | `cron(0 7 * * ? *)` | `rehab-nudge` | (none) |
+| `rehab-digest-weekly` | `cron(0 7 ? * FRI *)` | `rehab-digest` | `{"digestType":"weekly"}` |
+| `rehab-digest-monthly` | `cron(0 7 28 * ? *)` | `rehab-digest` | `{"digestType":"monthly"}` |
+
+### 5. Function URL public reachability — ✅ PASS (fixed in template; corrected diagnosis)
+Anonymous calls to the `AuthType: NONE` URL initially returned `403` before reaching the handler. The
+**real cause was an incomplete resource-based policy, not an account-level public-access block.** An
+`AuthType: NONE` Function URL needs **two** resource-policy grants, and the template only had the
+first:
+1. `lambda:InvokeFunctionUrl` (Principal `*`, condition `FunctionUrlAuthType=NONE`) — call the URL.
+2. `lambda:InvokeFunction` (Principal `*`, condition `Bool lambda:InvokedViaFunctionUrl=true`) —
+   actually invoke the function behind the URL.
+
+With only (1), anonymous requests 403 at the edge. Adding (2) — expressed natively in CloudFormation
+via `AWS::Lambda::Permission` with `Action: lambda:InvokeFunction` + `InvokedViaFunctionUrl: true` —
+fixes it. Both grants now live in `infra/log-session-stack.yaml`, so the fix survives a stack
+delete/redeploy (no manual patch). The earlier "account-level public-access block" theory was **wrong**
+and is retracted; the `put-public-access-block-config` remediation is **not** needed.
+
+Verified after redeploy (stack → `UPDATE_COMPLETE`) with the CFN-managed grants as the **sole** policy
+statements (the temporary manual `AllowPublicInvokeFunction` patch was removed first, proving the
+template alone suffices): plain anonymous `curl` → no key `401`, wrong key `401`, correct key + note
+`200` (item persisted with tags, then deleted, Count → 0). See §1.
+
+### 6. Secret hygiene — ✅ PASS
+32-byte secret (`openssl rand -hex 32`) written to gitignored `.secrets/session-log-secret`, supplied
+to CloudFormation via a `NoEcho` parameter sourced by command substitution
+(`SessionLogSecret="$(cat .secrets/session-log-secret)"`) — never typed inline. Proof it is not
+committed: `git status` shows `.secrets/` only under `--ignored` (`!!`), `git grep` for the secret
+value across tracked files returns nothing, and `.gitignore` carries `.secrets/`.
+
+### Artifacts added this phase
+- `src/lib/ddb.mjs`, `src/lib/email.mjs` (shared DocumentClient + SESv2 send).
+- `src/log-session/handler.mjs`, `src/nudge/handler.mjs`, `src/digest/handler.mjs` (+ exported
+  `composeBody` for deterministic reproduction).
+- `infra/log-session-stack.yaml`, `infra/notify-stack.yaml`.
+- `package.json`: `build:log-session` / `build:nudge` / `build:digest` scripts; `@aws-sdk/client-sesv2`
+  dev dep. `.gitignore`: `.secrets/`.
+
 ## Decision Log
 
 - **D-1 (2026-07-20):** Infra is raw CloudFormation, no SAM/Amplify CLI. Rationale: SAM
@@ -465,6 +592,72 @@ RESULT: all cases PASSED
   and in which direction, never *why*. Tag shape consumed by the logic (`sides.{left,right}.tags[] =
   [{symptomType, severity, flagForReview}]`) is defined here to match Phase 2's exact 3-key tagging
   output landing in the Phase 1 `tags:[]` slot; the session-writer that persists it is Phase 4.
+- **D-17 (2026-07-21):** The log-session endpoint is a **Lambda Function URL with `AuthType: NONE` at
+  the edge, gated by a shared-secret `x-api-key` header checked in-handler** before any parsing or
+  validation, against a `NoEcho` env var. Rationale: the locked spec wants a public, login-free write
+  endpoint; a shared secret keeps it usable from a simple frontend without an auth stack, and the
+  handler returns a **generic 401** for missing-or-wrong (never revealing which) using a constant-time
+  hash compare. Tradeoff: a shared secret is weaker than signed IAM auth and must be rotated if leaked,
+  but it matches the single-user, no-login design and keeps the door-check logic auditable in one place.
+  The secret is generated locally, stored gitignored, and passed via CloudFormation `NoEcho` — never
+  committed, never logged.
+- **D-18 (2026-07-21):** **One `rehab-digest` Lambda serves both cadences**, branching on an
+  EventBridge Scheduler input payload (`{"digestType":"weekly"}` vs `"monthly"`) from two separate
+  rules. Rationale: weekly and monthly share ~90% of the composition (adherence + asymmetry +
+  escalations); a single handler keeps that logic in one place and lets the cadence differences
+  (monthly-only trend section, weekly-only 7-day escalation scope) live as small branches rather than a
+  duplicated Lambda. The trigger, not the code, decides which cadence runs.
+- **D-19 (2026-07-21):** **Permissive CORS (`AllowOrigins: ["*"]`) on the Function URL is a temporary
+  Phase-4 decision, to be tightened in Phase 5.** Rationale: there is no known frontend origin yet, so
+  locking CORS now would be guessing. Once Phase 5 has a real deployed origin, restrict `AllowOrigins`
+  to it. Recorded explicitly so it is not forgotten. (Note: CORS is a browser convenience, not the
+  security control — the `x-api-key` check is; per D-17.)
+- **D-20 (2026-07-21):** **One shared `src/lib/email.mjs` (`sendRehabEmail`)** wraps the single SESv2
+  `SendEmailCommand`; both `rehab-nudge` and `rehab-digest` import it. Rationale: same lesson as Phase
+  3's shared `isPerformed()` — no duplicated SES setup/send between the two Lambdas, so sender/recipient
+  and error handling can't drift. Sends from/to the one verified sandbox identity
+  `marvin.ngonadi@gmail.com` (D-4).
+- **D-21 (2026-07-21):** **`ddb.mjs` was promoted into `src/lib/`** (mirroring the dev-side
+  `scripts/lib/ddb.mjs`) so bundled Lambda code imports a DocumentClient from `src/` without reaching
+  across the `src/`↔`scripts/` boundary. Rationale: the logic modules already live under `src/`; a
+  `src/lib/` peer keeps Lambda imports clean and esbuild-bundleable. The two copies are intentionally
+  parallel (dev tooling vs deployed code), not shared, to avoid coupling the deploy bundle to the
+  scripts tree.
+- **D-22 (2026-07-21):** **Weekly and monthly digests scope escalations differently.**
+  `detectActiveAsymmetries` keeps its full ~30-day window in both (it genuinely needs the history to
+  reach its minimum sample), but the **weekly** digest passes `compileEscalations` a session set
+  filtered to the **last 7 days**, while **monthly** passes the full window. Rationale: a flag must not
+  re-surface in four consecutive weekly emails (that would train the reader to ignore it); a monthly
+  roundup restating a flag once already mentioned is acceptable. So weekly reports "new this week",
+  monthly reports "the month".
+- **D-23 (2026-07-21):** **An anonymous `AuthType: NONE` Function URL requires TWO resource-policy
+  grants, and both are now codified in the template.** The `403` on anonymous calls was an **incomplete
+  resource-based policy**, not an account-level public-access block (that earlier theory is retracted —
+  the `put-public-access-block-config` route was a dead end and the operation isn't even in the current
+  SDK/CLI). AWS needs `lambda:InvokeFunctionUrl` (call the URL) **and** a separate `lambda:InvokeFunction`
+  grant conditioned on `Bool lambda:InvokedViaFunctionUrl=true` (invoke the function behind it); with
+  only the first, requests 403 at the edge before the handler runs. Rationale for codifying: the second
+  grant is expressible natively in CloudFormation (`AWS::Lambda::Permission` with `Action:
+  lambda:InvokeFunction` + `InvokedViaFunctionUrl: true`), so it belongs in
+  `infra/log-session-stack.yaml` alongside the first — a manual `add-permission` patch would silently
+  reappear as a gap on any stack delete/redeploy. The in-handler shared-secret check (D-17) remains the
+  actual access control; these two grants only govern whether a request reaches that check at all.
+  Verified live after redeploy with the CFN-managed grants as the sole policy statements (manual patch
+  removed first): anonymous curl → `401` without key, `200` with the correct key.
+- **D-24 (2026-07-21):** **All three email types (nudge, weekly digest, monthly digest) are confirmed
+  delivered end-to-end — they were landing in Gmail's Spam folder, not failing to send.** This is a
+  **known limitation, not fixed this phase.** What was checked: the raw SES send responses all carried
+  a `MessageId` (SES accepted every send); the SES **suppression list** was confirmed to not contain
+  the recipient (not suppressed); the account **sending status** was healthy/enabled. The messages were
+  then found in the Gmail **Spam** folder — a delivery/placement outcome, not a send failure — and
+  marked **"Not spam"** to begin retraining the filter. Why it happens: the SES sandbox identity is a
+  **bare verified email address**, not a domain identity, so outbound mail has **no SPF/DKIM
+  authentication signal**; combined with a **brand-new sending identity** (no prior reputation) and
+  **no recipient engagement history**, Gmail defaults to skepticism for exactly this pattern and files
+  it as spam. **Not fixed now** because the real fix — verifying a **domain identity with DKIM** (and
+  ideally SPF/DMARC) instead of a bare address — is out of scope for this single-user portfolio build;
+  noted as a future improvement. For this build, delivery-to-account is proven; inbox placement is best
+  handled by the recipient marking not-spam.
 
 ### Teardown note (recorded, not acted on)
 `DeletionProtectionEnabled: true` + `DeletionPolicy: Retain` mean deleting `rehab-data` first requires
@@ -473,12 +666,18 @@ policy **orphans** (does not delete) the tables — intentional for the permanen
 
 ---
 
-## Next: Phase 4
-**Phase 3 fully closed (2026-07-20).** The deterministic logic layer (`src/logic/`) is live and
-verified against real tables — adherence, asymmetry, escalation compiler, and trend narration, all
-pure functions with no AWS/clock/model, all cases passing via `node scripts/verify-logic.mjs`. The
-boundary language is proven clean (no banned recommendation words, structured-fields-only
-observations). Ready for Phase 4: the session-writer that persists tagging output into the
-`sides.tags[]` slot, and the EventBridge triggers (watcher on session-log for tagging, daily
-missed-session check) that feed these pure functions already-fetched data plus an explicit reference
-date, then route escalations/summaries to SES and the on-demand frontend.
+## Next: Phase 5
+**Phase 4 fully closed (2026-07-21).** The wiring is live: the `rehab-log-session` Function URL
+persists real sessions and tags each note via the `rehab-tagging` Lambda; `rehab-nudge` and
+`rehab-digest` run on three EventBridge Scheduler rules and send real SES email (first real sends of
+the project). All paths verified live — anonymous-HTTPS handler auth (401s), full write+tag+persist
+(200), both nudge branches, both digest cadences with correct escalation scoping and monthly-only
+trend, and all three schedules ENABLED with correct cron/timezone/input. The Function URL public-access
+`403` was root-caused to an incomplete resource-based policy (missing the second `InvokeFunction`
+grant) and **fixed in the template** (D-23), verified with the CFN-managed grants as the sole policy.
+The clinical boundary held throughout: digests report patterns and hand questions to the physio, never
+diagnose or explain *why*.
+
+**Ready for Phase 5:** the on-demand frontend deep view (logging form, weekly visual trend, session
+comparison, full detail behind the summary email). Phase 5 will also give the Function URL a real
+origin to replace the temporary permissive CORS (D-19).

@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Rehab-Recovery-Agent Phase 4 — log-session endpoint. A Lambda Function URL
+  (AuthType NONE at the edge, shared-secret x-api-key checked in-handler) that
+  validates a session submission, tags each per-side note by invoking the
+  rehab-tagging Lambda, and persists the Session item into rehab-sessions.
+
+Parameters:
+  SessionLogSecret:
+    Type: String
+    NoEcho: true
+    Description: >-
+      Shared secret the handler checks against the x-api-key header. Supplied at
+      deploy time from a gitignored file; never committed, never logged.
+
+Resources:
+
+  LogSessionFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rehab-log-session-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: rehab-log-session-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Write the assembled Session item — that one table only.
+              - Sid: WriteSessions
+                Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !ImportValue rehab-sessions-table-arn
+              # Delegate note classification to the tagging Lambda — that ARN only.
+              - Sid: InvokeTagging
+                Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !ImportValue rehab-tagging-function-arn
+              # CloudWatch Logs for this function's own group.
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rehab-log-session:*
+
+  # Declared explicitly (30-day retention) so log config lives in IaC, not
+  # console drift (closes the D-12 gap for new functions).
+  LogSessionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rehab-log-session
+      RetentionInDays: 30
+
+  LogSessionFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LogSessionLogGroup
+    Properties:
+      FunctionName: rehab-log-session
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt LogSessionFunctionRole.Arn
+      Code: ../dist/log-session/
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          SESSION_LOG_SECRET: !Ref SessionLogSecret
+          TAGGING_FUNCTION: !ImportValue rehab-tagging-function-name
+          SESSIONS_TABLE: !ImportValue rehab-sessions-table-name
+      Tags:
+        - Key: project
+          Value: rehab-recovery-agent
+        - Key: phase
+          Value: "4"
+
+  # AuthType NONE at the edge; the handler enforces the shared secret. CORS is
+  # permissive (*) FOR NOW — Phase 4 has no known frontend origin yet; restrict
+  # to the real origin in Phase 5 (D-19).
+  LogSessionFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt LogSessionFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - POST
+        AllowHeaders:
+          - content-type
+          - x-api-key
+
+  # Anonymous access over an AuthType NONE Function URL needs BOTH of these
+  # grants; one alone yields a 403 before the handler ever runs.
+  #  (1) lambda:InvokeFunctionUrl — permission to call the URL endpoint.
+  LogSessionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LogSessionFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  #  (2) lambda:InvokeFunction (conditioned on InvokedViaFunctionUrl) —
+  #  permission to actually invoke the function behind the URL. Emitted as
+  #  Condition Bool { lambda:InvokedViaFunctionUrl: "true" }. Without this
+  #  second statement, anonymous requests 403 at the edge. Codified here so the
+  #  grant survives a stack delete/redeploy instead of being a manual patch.
+  LogSessionInvokeFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LogSessionFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  LogSessionFunctionUrl:
+    Description: Public Function URL for logging a session (needs x-api-key header)
+    Value: !GetAtt LogSessionFunctionUrl.FunctionUrl
+    Export:
+      Name: rehab-log-session-url
