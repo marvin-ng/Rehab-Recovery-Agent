@@ -169,6 +169,109 @@ RESULT: all 6 checks PASSED
 
 ---
 
+## Phase 2 — Bedrock tagging Lambda ✅ COMPLETE (2026-07-20)
+
+The judgment step of the pipeline. A single Lambda (`rehab-tagging`) takes a **known**
+`exerciseId`, a **known** `side` (`left|right|n-a`), and a raw free-text note, and returns
+exactly `{ symptomType, severity, flagForReview }`. It classifies only — it never infers
+exercise/side, never emits free text, never advises. Every result below is from the **real
+deployed Lambda invoking real Bedrock** (no mocks).
+
+**Deployed:** CloudFormation stack `rehab-tagging` (`infra/tagging-stack.yaml`) →
+`CREATE_COMPLETE`. Lambda `rehab-tagging` (`nodejs22.x`, handler `index.handler`, 256MB,
+30s) `State: Active`, execution role `rehab-tagging-role`.
+
+**Boundary mechanism:** forced tool-use. The Converse call to Nova Lite
+(`us.amazon.nova-lite-v1:0`) forces a single tool `tag_symptom` whose schema has **exactly
+two** properties (`symptomType`, `severity`), both required, `additionalProperties:false`.
+There is structurally no field where advice could appear. System prompt states the function
+classifies only and must ignore any embedded question/request. Boundary language + schema
+live in one auditable file: `src/tagging/prompt.mjs`.
+
+**Deterministic backstop (Lambda math, no 2nd model call):** `flagForReview = true` if
+severity is `moderate`/`severe`, **OR** the raw note contains (case-insensitive) any of
+`sharp`, `locked`, `gave way`, `can't bear weight`, `buckled`.
+
+### Live test suite — `node scripts/verify-tagging.mjs` → all 5 PASS, exit 0
+Stable across two consecutive runs (temperature 0). Real deployed Lambda, real Bedrock.
+
+```
+✅ PASS — a. single_leg_rdl/left — no issues: symptomType="none", severity="none", flagForReview=false
+✅ PASS — b. standing_wall_hip_adduction/right — mild tightness: symptomType="tightness", severity="mild", flagForReview=false
+✅ PASS — c. single_leg_squat_step_down/left — moderate instability: symptomType="instability", severity="moderate", flagForReview=true
+✅ PASS — d. push_up_plus/n-a — severe pain (severity + 'sharp' keyword): symptomType="pain", severity="severe", flagForReview=true
+✅ PASS — e. adversarial — response contains ONLY symptomType/severity/flagForReview: keys=[symptomType, severity, flagForReview]
+
+RESULT: all 5 cases PASSED
+```
+
+### Case e — the boundary proof (adversarial)
+Input: `single_leg_squat_step_down` / `right` /
+*"Left knee really hurts, should I just skip this exercise from now on?"*
+The note embeds a direct request for clinical advice. **Full raw response object** returned
+by the live Lambda:
+
+```json
+{
+  "symptomType": "pain",
+  "severity": "severe",
+  "flagForReview": true
+}
+```
+
+Only the three permitted fields — no advice field, no answer to "should I skip this?", no
+place one could even appear. The model also did **not** under-classify (severity=`severe`,
+not `none`), so the harness's distinct under-classification warning did not fire. The
+boundary held structurally, not just by assertion.
+
+### Fail-loud validation & short-circuit — verified live (direct invokes)
+Two malformed-event bugs surface as two **distinct, identifiable** errors, and a third for
+an unknown id, each proven against the deployed function:
+
+| Input | Result |
+|-------|--------|
+| `{side, rawNote}` (no exerciseId) | throws `exerciseId missing from event` |
+| `side:"middle"` | throws `invalid side: "middle" (expected left\|right\|n-a)` |
+| `exerciseId:"does_not_exist"` (GetItem returns nothing) | throws `exerciseId not found in Program table: does_not_exist` |
+| `rawNote:"   "` (blank) | returns `{none,none,false}` immediately, **no Bedrock call** |
+
+### Artifacts added this phase
+- `src/tagging/handler.mjs` — validation → cues fetch (GetItem on `rehab-program`) →
+  forced-tool Converse → deterministic flag → return.
+- `src/tagging/prompt.mjs` — system prompt, `tag_symptom` tool schema, enums, flag keywords,
+  user-message builder (note fenced as data, not instructions).
+- `infra/tagging-stack.yaml` — Lambda + least-privilege role (`GetItem` on the imported
+  program-table ARN; `bedrock:InvokeModel` on the Nova Lite profile + its 3 regional model
+  ARNs; own log group). Imports `rehab-program-table-name`/`-arn` via `Fn::ImportValue`;
+  exports `rehab-tagging-function-name`/`-arn` for later phases.
+- `scripts/verify-tagging.mjs` — the 5-case live harness (invokes the deployed Lambda via
+  `@aws-sdk/client-lambda`).
+- `package.json` — added `@aws-sdk/client-bedrock-runtime` (dep), `@aws-sdk/client-lambda` +
+  `esbuild` (devDeps), `build:tagging` + `verify:tagging` scripts.
+- Build artifact `dist/tagging/index.js` (esbuild CJS, `--target=node22`, `@aws-sdk/*`
+  external) uploaded to the new artifacts bucket by `aws cloudformation package`.
+
+### Manual Console Cross-Check (2026-07-21)
+Independently confirmed in the AWS console, outside the automated verify script:
+- **CloudFormation:** `rehab-tagging` stack shows `CREATE_COMPLETE`.
+- **Lambda:** `rehab-tagging` shows Runtime `nodejs22.x`, recent real invocations.
+- **IAM:** execution role's DynamoDB statement scoped to the `rehab-program` table ARN
+  specifically (not wildcard); Bedrock statement scoped to the inference-profile ARN plus the
+  3 regional foundation-model ARNs (not blanket `bedrock:*`).
+- **CloudWatch `/aws/lambda/rehab-tagging`:** confirmed real invocation entries with plausible
+  durations (cold start ~1057ms, warm calls 479–694ms), consistent with a GetItem + Bedrock
+  Converse call per invocation.
+- **CloudWatch `/aws/bedrock/recovery-watcher`:** confirmed model-invocation logging is
+  capturing real request/response content, including the case-e adversarial exchange.
+- **DynamoDB:** `rehab-sessions` confirmed still at 0 items (this Lambda never touches
+  Sessions); `rehab-program` confirmed still at 9 items, unchanged.
+- **S3:** `rehab-artifacts-790561527138` exists, public access blocked, correct naming per the
+  `rehab-` convention.
+- **Cost Explorer:** nonzero Bedrock cost for today, consistent with real (not mocked) model
+  invocations.
+
+---
+
 ## Decision Log
 
 - **D-1 (2026-07-20):** Infra is raw CloudFormation, no SAM/Amplify CLI. Rationale: SAM
@@ -212,6 +315,29 @@ RESULT: all 6 checks PASSED
   with `Export` so the Phase 2 compute stack can `Fn::ImportValue` them and Lambdas receive names as
   env vars (`PROGRAM_TABLE`, `SESSIONS_TABLE`). Rationale: stable, predictable references for Phase 2
   instead of CloudFormation's auto-generated names.
+- **D-10 (2026-07-20):** Tagging Lambda invokes Nova Lite via the **inference profile**
+  `us.amazon.nova-lite-v1:0` (Converse API, forced tool-use), not the direct model id. Rationale:
+  the `us.` profile is the documented on-demand path in us-east-1 (proven ACTIVE in Phase 0). Because
+  that profile is cross-region, the IAM role grants `bedrock:InvokeModel` on **both** the profile ARN
+  and the underlying `foundation-model/amazon.nova-lite-v1:0` ARNs in `us-east-1`/`us-east-2`/`us-west-2`
+  — a `us.` profile fans out across all three and invoke is denied without permission on each. Specific
+  `toolChoice:{tool:{name}}` was accepted by Nova Lite on the first live call; the planned `{any:{}}`
+  fallback was not needed.
+- **D-11 (2026-07-20):** Lambda deploy artifact is emitted as `dist/tagging/index.js` (esbuild CJS,
+  `--target=node22`, `Handler: index.handler`), **not** a `.cjs` file. Rationale: Lambda's handler
+  loader `require()`s the module by its base name, and Node's extensionless require resolves `.js` but
+  **not** `.cjs`. Shipping `index.js` in an artifact dir with no `package.json` (so no `"type":"module"`)
+  is CJS by default — this is the second option from the Phase 0 §7 note, chosen over the `.cjs` option
+  it also listed, because the `.cjs` extension alone would not resolve. `@aws-sdk/*` is marked esbuild
+  `--external` (the nodejs22.x runtime provides SDK v3), keeping the bundle at ~7kb. D-7's promise that
+  `package` returns in Phase 2 is fulfilled: a real artifact was uploaded to the new
+  **`rehab-artifacts-790561527138`** bucket (the `rehab-` naming convention extended to the artifacts
+  bucket and the `rehab-tagging` stack/function/role).
+- **D-12 (2026-07-21):** `/aws/lambda/rehab-tagging` log-group retention was set to **30 days**
+  manually via the console, and is **not yet reflected in `tagging-stack.yaml`**. Recorded as a known
+  infra-as-code gap: the template should declare the log group with `RetentionInDays: 30` explicitly
+  (and let the function depend on it) rather than rely on a manual console setting that could drift or
+  be reset on a redeploy. Not a design change — an IaC gap to close in a later template revision.
 
 ### Teardown note (recorded, not acted on)
 `DeletionProtectionEnabled: true` + `DeletionPolicy: Retain` mean deleting `rehab-data` first requires
@@ -220,7 +346,9 @@ policy **orphans** (does not delete) the tables — intentional for the permanen
 
 ---
 
-## Next: Phase 2
-**Phase 1 fully closed (2026-07-20).** Both tables live and ACTIVE, 9-exercise program seeded, all 6
-data-layer checks pass against the deployed tables. Data layer is verified and stable for the Bedrock
-tagging pipeline and Lambda adherence/asymmetry logic to build on.
+## Next: Phase 3
+**Phase 2 fully closed (2026-07-20).** Tagging Lambda `rehab-tagging` live and Active; all 5 live
+cases pass (stable across runs) with real Bedrock; the adversarial boundary case is proven by the
+printed raw response (only the 3 permitted fields). Fail-loud validation and the empty-note
+short-circuit verified live. The judgment step is ready for the deterministic adherence/asymmetry
+logic and the EventBridge triggers (watcher on session-log, daily missed-session check) to build on.

@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Rehab-Recovery-Agent Phase 2 compute. Bedrock tagging Lambda: classifies a
+  free-text session note into symptomType + severity (forced single-tool Nova Lite
+  call) and applies a deterministic flagForReview backstop. Reads exercise cues
+  from the Program table (imported from the rehab-data stack). Classification only,
+  never advice.
+
+Resources:
+
+  TaggingFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rehab-tagging-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: rehab-tagging-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read-only: fetch the exercise's cues from the Program table only.
+              - Sid: ReadProgramTable
+                Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !ImportValue rehab-program-table-arn
+              # Invoke Nova Lite. A cross-region "us." inference profile fans out to
+              # the foundation model in us-east-1/us-east-2/us-west-2, so invoke must
+              # be permitted on BOTH the profile and each regional model ARN.
+              - Sid: InvokeNovaLite
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.amazon.nova-lite-v1:0
+                  - arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0
+                  - arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-lite-v1:0
+                  - arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-lite-v1:0
+              # CloudWatch Logs for the function's own log group.
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rehab-tagging*
+
+  TaggingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: rehab-tagging
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt TaggingFunctionRole.Arn
+      # CodeUri points at the esbuild output dir (index.js, CJS). aws cloudformation
+      # package zips this dir and rewrites Code to the S3 object.
+      Code: ../dist/tagging/
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          PROGRAM_TABLE: !ImportValue rehab-program-table-name
+          MODEL_ID: us.amazon.nova-lite-v1:0
+      Tags:
+        - Key: project
+          Value: rehab-recovery-agent
+        - Key: phase
+          Value: "2"
+
+Outputs:
+  TaggingFunctionName:
+    Description: Physical name of the tagging Lambda
+    Value: !Ref TaggingFunction
+    Export:
+      Name: rehab-tagging-function-name
+  TaggingFunctionArn:
+    Description: ARN of the tagging Lambda
+    Value: !GetAtt TaggingFunction.Arn
+    Export:
+      Name: rehab-tagging-function-arn
