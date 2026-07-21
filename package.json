@@ -7,7 +7,8 @@
     "seed": "node scripts/seed-program.mjs",
     "verify": "node scripts/verify-data.mjs",
     "build:tagging": "esbuild src/tagging/handler.mjs --bundle --platform=node --format=cjs --target=node22 --external:@aws-sdk/* --outfile=dist/tagging/index.js",
-    "verify:tagging": "node scripts/verify-tagging.mjs"
+    "verify:tagging": "node scripts/verify-tagging.mjs",
+    "verify:logic": "node scripts/verify-logic.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.700.0",
