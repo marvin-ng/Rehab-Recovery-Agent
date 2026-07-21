@@ -681,3 +681,105 @@ diagnose or explain *why*.
 **Ready for Phase 5:** the on-demand frontend deep view (logging form, weekly visual trend, session
 comparison, full detail behind the summary email). Phase 5 will also give the Function URL a real
 origin to replace the temporary permissive CORS (D-19).
+
+---
+
+## Phase 5 (Part A) — Frontend + read endpoint — ✅ COMPLETE (2026-07-21)
+Local-only milestone: the on-demand frontend (Vite + React + TS + shadcn/ui) plus the one read-only
+backend endpoint it needs. **No Vercel deploy** — that is Part B. Verified end-to-end against the live
+AWS backend.
+
+**Deployed (backend):** the existing `rehab-log-session` stack was extended in place (not a new stack)
+with a second Lambda + Function URL, `rehab-dashboard-data` (read-only GET). Redeployed via the proven
+`aws cloudformation package` → `deploy` path (artifacts bucket `rehab-artifacts-790561527138`,
+`--capabilities CAPABILITY_NAMED_IAM`, secret via the `ApiSecret` NoEcho param). Stack →
+`UPDATE_COMPLETE`.
+
+Function URLs (both AuthType NONE at the edge, shared secret in-handler):
+- log-session (POST): `https://6owlutqcgqvjnvbaenmywy2dgi0qvbjr.lambda-url.us-east-1.on.aws/`
+- dashboard-data (GET): `https://bsve7qr3msascmtlcmfng5rbsy0uoudi.lambda-url.us-east-1.on.aws/`
+
+### 1. `rehab-dashboard-data` (read-only) — ✅
+`src/dashboard-data/handler.mjs` queries active Program items + a ~60-day Sessions window, then calls
+the EXISTING Phase 3 pure logic directly (`weeklyAdherence`, `detectActiveAsymmetries`,
+`compileEscalations`, `computeTrend`) — no math re-implemented. Returns one payload:
+`{ asOfDate, adherence, asymmetryResults, escalations, trend, recentSessions, programItems }`.
+`programItems` is included so the logging form renders without a second endpoint. `recentSessions` is a
+display-only history list carrying, per side, `completed` + `rawNote` + `tags` (raw notes were kept
+permanently in Phase 1 precisely to be read back here). The clinical boundary is untouched:
+`compileEscalations` still builds observation/question text from structured fields only; the frontend
+renders that text **verbatim**.
+**IAM (least privilege):** inline policy grants `dynamodb:Query` on **both** table ARNs and CloudWatch
+Logs — nothing else. No `PutItem`, no `InvokeFunction` (contrast log-session, which needs both).
+
+### 2. Secret check consolidated — ✅
+The constant-time, length-tolerant sha256 compare was extracted from `rehab-log-session`'s handler into
+`src/lib/auth.mjs` as a single `verifyApiSecret(event)`. Both handlers import it and call it first,
+before any other processing. The env var `SESSION_LOG_SECRET` was renamed **`API_SECRET`** (and the
+NoEcho parameter `SessionLogSecret` → `ApiSecret`) since it now gates two endpoints. Secret value
+unchanged (still sourced from gitignored `.secrets/session-log-secret`).
+
+### 3. curl smoke test (both endpoints, before frontend) — ✅
+Re-verified the refactor didn't break either path — including the **wrong-key** case specifically, not
+just missing-key, since the compare now lives in a shared module consumed by a second handler:
+
+| | no key | wrong key | correct key |
+|---|---|---|---|
+| dashboard-data (GET) | 401 | 401 | 200 (payload) |
+| log-session (POST) | 401 | 401 | 400 validation (auth passed) |
+
+### 4. Frontend — ✅
+`web/` scaffolded with `npm create vite` (react-ts). shadcn set up with the specified preset: `init`
+told us `apply` needs `components.json` first, so `npx shadcn@latest init --preset b7CSh7vqC` ran
+first (Tailwind v4 + a monochrome theme, Inter Variable font, `tw-animate-css` + `shadcn/tailwind.css`,
+`src/lib/utils.ts`, `components.json`), then `npx shadcn@latest apply --preset b7CSh7vqC` → **"Preset
+applied successfully."** Components added: button, card, checkbox, textarea, slider, chart (Recharts),
+table, input, label, badge, tabs, sonner.
+- **Auth gate** (`src/components/AuthGate.tsx` + `src/lib/api.ts`): on load, checks `localStorage` for
+  the key; if absent, only the "Enter access key" screen renders. Stored on submit; sent as `x-api-key`
+  on every call. Any `401` clears the key and re-shows the gate with an error — no silent retry.
+- **Log Session** (`src/views/LogSession.tsx`): active exercises grouped by section; per-side checkbox
+  + note textarea where `perSide`, single checkbox otherwise; three shadcn Sliders (0–10); POSTs to the
+  log-session Function URL.
+- **Dashboard** (`src/views/Dashboard.tsx`): adherence, asymmetry flags, escalations (verbatim), a
+  trend line chart (shadcn Chart / Recharts) of the three ratings over session dates, and a session
+  history table with per-side notes. **Honest empty states**: `insufficient_data` (asymmetry, trend)
+  and empty `escalations` render explicit "not enough data yet" / "No flagged concerns" copy — this is
+  what first real use shows, not an edge case.
+- **Chart color:** the preset's `--chart-1..5` are near-monochrome (three lines would be
+  indistinguishable), so the trend series use a validated CVD-safe categorical trio from the dataviz
+  default palette (pain=blue, stiffness=orange, confidence=aqua), stepped per light/dark mode, carried
+  as `--series-*` CSS vars. Validated with the dataviz validator (`--pairs all`, light + dark: all CVD
+  and normal-vision checks PASS; light-mode aqua's sub-3:1 contrast WARN is relieved by the always-on
+  legend + the raw-value history table).
+
+### 5. Local verification (against live AWS) — ✅
+- **End-to-end write:** replicated the frontend's exact `submitSession` request (Function URL from
+  `web/.env.local`, `x-api-key` header, real payload shape) with a throwaway date `2020-01-15` (Sessions
+  SK is the date, so a same-date log overwrites — avoided clobbering real data). → `200 {ok:true}`, item
+  landed in `rehab-sessions` with the note AI-tagged (`symptomType:pain, severity:severe,
+  flagForReview:true`), then deleted; table Count back to `0`.
+- **Browser (headless Chrome via CDP):** auth gate renders and is the *only* thing shown with no key;
+  with the real key injected into `localStorage`, the Dashboard renders real data (adherence 0 / below
+  target, "No flagged concerns", asymmetry + trend "not enough data yet", empty history — the true
+  first-use state); the Log Session view renders all 9 active exercises grouped by section with correct
+  per-side vs single controls and the three sliders.
+- **Invalid key → re-prompt:** with a wrong key in `localStorage`, the 401 cleared the stored key
+  (`localStorage` back to `null`) and re-showed the gate with "That access key was rejected. Please try
+  again." — no silent retry.
+- **dist/ secret grep (the actual proof):** `npm run build`, then
+  `grep -rF "$(cat ../.secrets/session-log-secret)" dist/` → **zero matches**. The 64-char secret is
+  never bundled; the key only ever comes from user input into `localStorage`. (The `rehab.apiKey`
+  *storage-key name* does appear in the bundle — that is app code, not the secret.)
+
+### CORS — intentionally deferred (not forgotten)
+Both Function URLs keep `AllowOrigins: ["*"]` for now (D-19). Locking this to the real Vercel origin is
+explicitly **Part B**, once a deployed domain exists — deferred deliberately, tracked here.
+
+### Artifacts added this phase
+- `src/lib/auth.mjs` (shared `verifyApiSecret`), `src/dashboard-data/handler.mjs`.
+- `infra/log-session-stack.yaml`: `ApiSecret` param + the `rehab-dashboard-data` role/loggroup/function/
+  URL/permissions/output.
+- `package.json`: `build:dashboard-data` script.
+- `web/` — the full Vite + React + TS + shadcn app (gitignored `dist/` and `.env.local`; committed
+  `.env.example` with the non-secret Function URLs).

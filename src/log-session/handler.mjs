@@ -13,12 +13,12 @@
 // AUTH: Function URL is AuthType NONE at the infra level; a shared-secret
 // header (x-api-key) is checked HERE, before any other processing.
 
-import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { ddb, SESSIONS_TABLE, SESSION_PK, REGION } from "../lib/ddb.mjs";
+import { verifyApiSecret } from "../lib/auth.mjs";
 
-const SESSION_LOG_SECRET = process.env.SESSION_LOG_SECRET;
 const TAGGING_FUNCTION = process.env.TAGGING_FUNCTION || "rehab-tagging";
 
 const VALID_SIDES = new Set(["left", "right", "n-a"]);
@@ -26,18 +26,6 @@ const RATING_KEYS = ["painRating", "stiffnessRating", "confidenceRating"];
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const lambda = new LambdaClient({ region: REGION });
-
-// Constant-time secret compare that also tolerates length differences: hash
-// both sides to a fixed 32 bytes first, so timingSafeEqual never throws and the
-// comparison time does not depend on where the mismatch is.
-function secretMatches(provided) {
-  if (typeof provided !== "string" || typeof SESSION_LOG_SECRET !== "string") {
-    return false;
-  }
-  const a = createHash("sha256").update(provided).digest();
-  const b = createHash("sha256").update(SESSION_LOG_SECRET).digest();
-  return timingSafeEqual(a, b);
-}
 
 const json = (statusCode, obj) => ({
   statusCode,
@@ -130,9 +118,7 @@ async function tagNote(exerciseId, side, rawNote) {
 export const handler = async (event = {}) => {
   // --- AUTH FIRST: before parsing, validating, anything. Generic 401 that does
   // not reveal whether the key was missing vs wrong. ---
-  const headers = event.headers || {};
-  const provided = headers["x-api-key"]; // Function URL v2 lowercases header keys
-  if (!secretMatches(provided)) {
+  if (!verifyApiSecret(event)) {
     return json(401, { error: "unauthorized" });
   }
 

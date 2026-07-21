@@ -45,6 +45,15 @@ Same split as the previous Ticket Triage project: **Bedrock does judgment (taggi
 - Bundler must target node22 explicitly; local Node version is not the deploy target. Every Lambda's CloudFormation `Runtime` is `nodejs22.x`.
 - This file is living documentation. Update it as Phase 0 confirms environment details, and whenever reality diverges from the plan.
 
+## Frontend auth (Phase 5)
+The frontend (`web/`) is gated by a single shared secret sent as the `x-api-key` header — the same
+secret both Function URLs check in-handler. The key **only ever comes from user input into
+`localStorage`**; it is never hardcoded, never committed, and never bundled (proven by a `dist/`
+grep for the literal value → zero matches). No key → only the "Enter access key" screen renders; any
+`401` clears the stored key and re-shows that screen with an error, no silent retry. Function URLs
+themselves are non-secret and live in `.env`. This is the app's real security boundary — treat it as
+such when touching the frontend.
+
 ## Known limitations
 - Email delivery confirmed working but not guaranteed to land in inbox — currently lands in spam due to no sender reputation/DKIM on the bare-address SES identity. See PROJECT_STATUS.md for full detail. Domain verification with DKIM would be the real fix, out of scope for this build.
 

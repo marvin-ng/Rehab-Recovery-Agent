@@ -8,6 +8,7 @@
     "verify": "node scripts/verify-data.mjs",
     "build:tagging": "esbuild src/tagging/handler.mjs --bundle --platform=node --format=cjs --target=node22 --external:@aws-sdk/* --outfile=dist/tagging/index.js",
     "build:log-session": "esbuild src/log-session/handler.mjs --bundle --platform=node --format=cjs --target=node22 --external:@aws-sdk/* --outfile=dist/log-session/index.js",
+    "build:dashboard-data": "esbuild src/dashboard-data/handler.mjs --bundle --platform=node --format=cjs --target=node22 --external:@aws-sdk/* --outfile=dist/dashboard-data/index.js",
     "build:nudge": "esbuild src/nudge/handler.mjs --bundle --platform=node --format=cjs --target=node22 --external:@aws-sdk/* --outfile=dist/nudge/index.js",
     "build:digest": "esbuild src/digest/handler.mjs --bundle --platform=node --format=cjs --target=node22 --external:@aws-sdk/* --outfile=dist/digest/index.js",
     "verify:tagging": "node scripts/verify-tagging.mjs",

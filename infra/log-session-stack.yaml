@@ -1,16 +1,17 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >-
-  Rehab-Recovery-Agent Phase 4 — log-session endpoint. A Lambda Function URL
-  (AuthType NONE at the edge, shared-secret x-api-key checked in-handler) that
-  validates a session submission, tags each per-side note by invoking the
-  rehab-tagging Lambda, and persists the Session item into rehab-sessions.
+  Rehab-Recovery-Agent Phase 4/5 — session endpoints. Two Lambda Function URLs
+  (AuthType NONE at the edge, shared-secret x-api-key checked in-handler):
+  rehab-log-session (POST) validates + tags + persists a session; rehab-
+  dashboard-data (GET, read-only) returns the frontend payload computed from the
+  Phase 3 logic. Both gate on the same ApiSecret.
 
 Parameters:
-  SessionLogSecret:
+  ApiSecret:
     Type: String
     NoEcho: true
     Description: >-
-      Shared secret the handler checks against the x-api-key header. Supplied at
+      Shared secret both handlers check against the x-api-key header. Supplied at
       deploy time from a gitignored file; never committed, never logged.
 
 Resources:
@@ -70,7 +71,7 @@ Resources:
       Timeout: 30
       Environment:
         Variables:
-          SESSION_LOG_SECRET: !Ref SessionLogSecret
+          API_SECRET: !Ref ApiSecret
           TAGGING_FUNCTION: !ImportValue rehab-tagging-function-name
           SESSIONS_TABLE: !ImportValue rehab-sessions-table-name
       Tags:
@@ -120,9 +121,110 @@ Resources:
       Principal: "*"
       InvokedViaFunctionUrl: true
 
+  # --- Phase 5: rehab-dashboard-data (read-only GET) -----------------------
+
+  DashboardDataFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: rehab-dashboard-data-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: rehab-dashboard-data-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read-only: Query both tables and nothing else. No PutItem, no
+              # InvokeFunction — this endpoint only reads and computes.
+              - Sid: ReadTables
+                Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !ImportValue rehab-sessions-table-arn
+                  - !ImportValue rehab-program-table-arn
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rehab-dashboard-data:*
+
+  DashboardDataLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rehab-dashboard-data
+      RetentionInDays: 30
+
+  DashboardDataFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DashboardDataLogGroup
+    Properties:
+      FunctionName: rehab-dashboard-data
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt DashboardDataFunctionRole.Arn
+      Code: ../dist/dashboard-data/
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          API_SECRET: !Ref ApiSecret
+          SESSIONS_TABLE: !ImportValue rehab-sessions-table-name
+          PROGRAM_TABLE: !ImportValue rehab-program-table-name
+      Tags:
+        - Key: project
+          Value: rehab-recovery-agent
+        - Key: phase
+          Value: "5"
+
+  # AuthType NONE at the edge; the handler enforces the shared secret. CORS is
+  # permissive (*) FOR NOW — locked to the real Vercel origin in Phase 5 Part B
+  # once a domain exists (D-19).
+  DashboardDataFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt DashboardDataFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+        AllowHeaders:
+          - content-type
+          - x-api-key
+
+  # Anonymous access over an AuthType NONE Function URL needs BOTH grants; one
+  # alone yields a 403 before the handler ever runs (same pattern as log-session).
+  DashboardDataUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DashboardDataFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  DashboardDataInvokeFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DashboardDataFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
 Outputs:
   LogSessionFunctionUrl:
     Description: Public Function URL for logging a session (needs x-api-key header)
     Value: !GetAtt LogSessionFunctionUrl.FunctionUrl
     Export:
       Name: rehab-log-session-url
+  DashboardDataFunctionUrl:
+    Description: Public read-only Function URL for the dashboard payload (needs x-api-key header)
+    Value: !GetAtt DashboardDataFunctionUrl.FunctionUrl
+    Export:
+      Name: rehab-dashboard-data-url
