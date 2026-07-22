@@ -81,8 +81,9 @@ Resources:
           Value: "4"
 
   # AuthType NONE at the edge; the handler enforces the shared secret. CORS is
-  # permissive (*) FOR NOW — Phase 4 has no known frontend origin yet; restrict
-  # to the real origin in Phase 5 (D-19).
+  # locked to the production Vercel origin (D-19 closed, Phase 5 Part B) —
+  # exact match, https, no trailing slash. Vercel preview URLs are intentionally
+  # NOT allowlisted (see PROJECT_STATUS.md Phase 5 Part B).
   LogSessionFunctionUrl:
     Type: AWS::Lambda::Url
     Properties:
@@ -90,7 +91,7 @@ Resources:
       AuthType: NONE
       Cors:
         AllowOrigins:
-          - "*"
+          - "https://rehab-recovery-agent.vercel.app"
         AllowMethods:
           - POST
         AllowHeaders:
@@ -183,8 +184,9 @@ Resources:
           Value: "5"
 
   # AuthType NONE at the edge; the handler enforces the shared secret. CORS is
-  # permissive (*) FOR NOW — locked to the real Vercel origin in Phase 5 Part B
-  # once a domain exists (D-19).
+  # locked to the production Vercel origin (D-19 closed, Phase 5 Part B) — exact
+  # match, https, no trailing slash. Vercel preview URLs are intentionally NOT
+  # allowlisted (see PROJECT_STATUS.md Phase 5 Part B).
   DashboardDataFunctionUrl:
     Type: AWS::Lambda::Url
     Properties:
@@ -192,7 +194,7 @@ Resources:
       AuthType: NONE
       Cors:
         AllowOrigins:
-          - "*"
+          - "https://rehab-recovery-agent.vercel.app"
         AllowMethods:
           - GET
         AllowHeaders:

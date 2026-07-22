@@ -56,6 +56,8 @@ such when touching the frontend.
 
 ## Known limitations
 - Email delivery confirmed working but not guaranteed to land in inbox — currently lands in spam due to no sender reputation/DKIM on the bare-address SES identity. See PROJECT_STATUS.md for full detail. Domain verification with DKIM would be the real fix, out of scope for this build.
+- CORS on both Function URLs is locked to the production origin `https://rehab-recovery-agent.vercel.app` only. Vercel **preview** deployments get their own random domains and are intentionally **not** allowlisted — they'll be CORS-blocked against the live backend. Deliberate for a single-developer project (a `*.vercel.app` match would defeat the lock); add an exact preview origin temporarily if ever needed. See PROJECT_STATUS.md Phase 5 Part B.
+- Sessions are keyed by date (`SK = YYYY-MM-DD`), so logging twice for the same date is a **full-item overwrite, not a merge**. Any live write test MUST use a throwaway date; PITR is the recovery net (proven in Phase 5 Part B) but the primary guard is not writing test payloads to a real date.
 
 ## Status
 See PROJECT_STATUS.md for phase findings, environment details, and decision log.

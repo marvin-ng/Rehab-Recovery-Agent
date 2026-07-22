@@ -14,6 +14,8 @@ import {
   SESSIONS_TABLE,
   PROGRAM_PK,
   SESSION_PK,
+  TEST_ONLY_DATE,
+  TEST_ONLY_RANGE,
 } from "./lib/ddb.mjs";
 import { checkMissedSession, weeklyAdherence } from "../src/logic/adherence.mjs";
 import {
@@ -36,8 +38,10 @@ async function check(label, fn) {
 }
 
 // Fixed reference date — the logic never reads the clock, so every window is
-// derived deterministically from this constant.
-const AS_OF = "2026-07-20";
+// derived deterministically from this constant. Anchored to the reserved
+// TEST_ONLY_DATE namespace (year 2000) so every seeded/deleted session lands on
+// a date that can never collide with a real logged session.
+const AS_OF = TEST_ONLY_DATE;
 
 // "YYYY-MM-DD" for `offset` days before AS_OF (test-side date math only).
 function ago(offset) {
@@ -72,7 +76,10 @@ function session(date, { completedExercises = [], pain = 0, stiffness = 0, confi
 }
 
 // Seed the given sessions live, hand the round-tripped items to `fn`, and ALWAYS
-// delete them afterward so no case leaves rows behind.
+// delete them afterward so no case leaves rows behind. The read-back is scoped
+// to the reserved test-date range, so the pure logic only ever sees the seeded
+// test rows — never a real session that happens to share the partition (which
+// would otherwise contaminate window math like "most recent session").
 async function withSeededSessions(sessions, fn) {
   try {
     for (const s of sessions) {
@@ -81,8 +88,12 @@ async function withSeededSessions(sessions, fn) {
     const res = await ddb.send(
       new QueryCommand({
         TableName: SESSIONS_TABLE,
-        KeyConditionExpression: "PK = :p",
-        ExpressionAttributeValues: { ":p": SESSION_PK },
+        KeyConditionExpression: "PK = :p AND SK BETWEEN :start AND :end",
+        ExpressionAttributeValues: {
+          ":p": SESSION_PK,
+          ":start": TEST_ONLY_RANGE.start,
+          ":end": TEST_ONLY_RANGE.end,
+        },
       })
     );
     return await fn(res.Items);
@@ -353,18 +364,23 @@ async function run() {
     });
   });
 
-  // --- Final: Sessions pristine after every case ---
-  await check("Sessions pristine after all cases (Count===0)", async () => {
+  // --- Final: no TEST rows remain (scoped to the reserved test-date range, so a
+  // real session in the partition neither trips this nor gets touched) ---
+  await check("No test rows remain after all cases (test-range Count===0)", async () => {
     const res = await ddb.send(
       new QueryCommand({
         TableName: SESSIONS_TABLE,
-        KeyConditionExpression: "PK = :p",
-        ExpressionAttributeValues: { ":p": SESSION_PK },
+        KeyConditionExpression: "PK = :p AND SK BETWEEN :start AND :end",
+        ExpressionAttributeValues: {
+          ":p": SESSION_PK,
+          ":start": TEST_ONLY_RANGE.start,
+          ":end": TEST_ONLY_RANGE.end,
+        },
         Select: "COUNT",
       })
     );
-    assert.equal(res.Count, 0, `expected 0 sessions, got ${res.Count}`);
-    return "Count=0";
+    assert.equal(res.Count, 0, `expected 0 test-range sessions, got ${res.Count}`);
+    return "test-range Count=0";
   });
 }
 

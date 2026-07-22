@@ -18,6 +18,8 @@ import {
   SESSIONS_TABLE,
   PROGRAM_PK,
   SESSION_PK,
+  TEST_ONLY_DATE,
+  TEST_ONLY_RANGE,
 } from "./lib/ddb.mjs";
 
 let failures = 0;
@@ -32,11 +34,15 @@ async function check(label, fn) {
   }
 }
 
-// ISO date (YYYY-MM-DD) offset from today by `days` (negative = past).
-function isoDay(offset) {
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + offset);
-  return d.toISOString().slice(0, 10);
+// ISO date (YYYY-MM-DD) `offset` days from the reserved TEST_ONLY_DATE anchor
+// (negative = earlier). Deliberately NOT clock-based: test rows live in the
+// year-2000 namespace so a seed/delete can never collide with a real session's
+// real calendar date.
+function testDay(offset) {
+  const [y, m, d] = TEST_ONLY_DATE.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + offset);
+  return dt.toISOString().slice(0, 10);
 }
 
 const EXPECTED_PROGRAM_FIELDS = [
@@ -78,15 +84,16 @@ function makeSession(date, sessionId, painRating) {
   };
 }
 
-// Synthetic sessions: 3 inside the last-7-days window (offsets 0, -3, -6) and
-// one outside it (-10) as a negative control for the range query.
-const today = isoDay(0);
-const day3 = isoDay(-3);
-const day6 = isoDay(-6);
-const day10 = isoDay(-10);
+// Synthetic sessions: 3 inside a 7-day window ending at the anchor (offsets 0,
+// -3, -6) and one outside it (-10) as a negative control for the range query.
+// All dates sit in the reserved test-year namespace, never the real clock.
+const anchor = testDay(0); // == TEST_ONLY_DATE
+const day3 = testDay(-3);
+const day6 = testDay(-6);
+const day10 = testDay(-10);
 
 const synthetic = [
-  makeSession(today, "verify-roundtrip", 2),
+  makeSession(anchor, "verify-roundtrip", 2),
   makeSession(day3, "verify-d3", 1),
   makeSession(day6, "verify-d6", 3),
   makeSession(day10, "verify-d10-outside", 2),
@@ -149,26 +156,31 @@ async function run() {
       return `deep-equal on ${written.SK} (sessionId=${written.sessionId})`;
     });
 
-    // --- Check 4: most recent session ---
+    // --- Check 4: most recent session (scoped to the test range so a real
+    // session in the partition can't win the ScanIndexForward:false query) ---
     await check("most recent session (ScanIndexForward:false, Limit:1)", async () => {
       const res = await ddb.send(
         new QueryCommand({
           TableName: SESSIONS_TABLE,
-          KeyConditionExpression: "PK = :p",
-          ExpressionAttributeValues: { ":p": SESSION_PK },
+          KeyConditionExpression: "PK = :p AND SK BETWEEN :start AND :end",
+          ExpressionAttributeValues: {
+            ":p": SESSION_PK,
+            ":start": TEST_ONLY_RANGE.start,
+            ":end": TEST_ONLY_RANGE.end,
+          },
           ScanIndexForward: false,
           Limit: 1,
         })
       );
       assert.equal(res.Count, 1, "expected exactly 1 item");
-      assert.equal(res.Items[0].SK, today, `expected most-recent ${today}, got ${res.Items[0].SK}`);
+      assert.equal(res.Items[0].SK, anchor, `expected most-recent ${anchor}, got ${res.Items[0].SK}`);
       return `latest = ${res.Items[0].SK}`;
     });
 
-    // --- Check 5: last-7-days range query ---
-    await check("last-7-days range query (BETWEEN)", async () => {
-      const start = isoDay(-6);
-      const end = today;
+    // --- Check 5: 7-day range query (BETWEEN) ---
+    await check("7-day range query (BETWEEN)", async () => {
+      const start = testDay(-6);
+      const end = anchor;
       const res = await ddb.send(
         new QueryCommand({
           TableName: SESSIONS_TABLE,
@@ -178,7 +190,7 @@ async function run() {
       );
       const dates = res.Items.map((i) => i.SK).sort();
       // Expect the 3 in-window rows; the -10 negative control must be excluded.
-      assert.deepStrictEqual(dates, [day6, day3, today].sort(), `unexpected window contents: ${dates}`);
+      assert.deepStrictEqual(dates, [day6, day3, anchor].sort(), `unexpected window contents: ${dates}`);
       assert.ok(!dates.includes(day10), "negative control (-10d) leaked into window");
       return `window ${start}..${end} returned ${dates.length} rows: ${dates.join(", ")}`;
     });
@@ -191,18 +203,23 @@ async function run() {
     }
   }
 
-  // --- Check 6: Sessions pristine after cleanup ---
-  await check("Sessions pristine after cleanup (Count===0)", async () => {
+  // --- Check 6: no TEST rows remain after cleanup (scoped to the reserved
+  // test-date range, so a real session neither trips this nor gets touched) ---
+  await check("No test rows remain after cleanup (test-range Count===0)", async () => {
     const res = await ddb.send(
       new QueryCommand({
         TableName: SESSIONS_TABLE,
-        KeyConditionExpression: "PK = :p",
-        ExpressionAttributeValues: { ":p": SESSION_PK },
+        KeyConditionExpression: "PK = :p AND SK BETWEEN :start AND :end",
+        ExpressionAttributeValues: {
+          ":p": SESSION_PK,
+          ":start": TEST_ONLY_RANGE.start,
+          ":end": TEST_ONLY_RANGE.end,
+        },
         Select: "COUNT",
       })
     );
-    assert.equal(res.Count, 0, `expected 0 sessions after cleanup, got ${res.Count}`);
-    return "Count=0";
+    assert.equal(res.Count, 0, `expected 0 test-range sessions after cleanup, got ${res.Count}`);
+    return "test-range Count=0";
   });
 }
 

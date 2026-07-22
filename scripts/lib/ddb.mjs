@@ -14,6 +14,28 @@ export const SESSIONS_TABLE = process.env.SESSIONS_TABLE || "rehab-sessions";
 export const PROGRAM_PK = "PROGRAM";
 export const SESSION_PK = "SESSION";
 
+// Reserved date namespace for TEST writes to the Sessions table.
+//
+// Real sessions are keyed by their real calendar date (SK = "YYYY-MM-DD"), and a
+// second PutItem on an existing date is a full-item OVERWRITE, not a merge — so
+// any harness that seeds synthetic sessions and deletes them in a `finally` will
+// silently destroy a real session if its date collides. (This is exactly the
+// class of mistake that overwrote a real 2026-07-21 session in Phase 5 Part B;
+// PITR recovered it, but the primary guard is to never write a test row to a
+// date that could hold real data.)
+//
+// The logic layer is pure and clock-free, so an absolute anchor in the year 2000
+// behaves identically to "today" for every window calculation — only the
+// absolute SK changes, moving all test rows into a namespace that no real
+// session (this tool began in 2026) will ever occupy. Mid-year so ±180 days of
+// offset math stays inside the reserved year.
+export const TEST_ONLY_DATE = "2000-06-15";
+
+// Inclusive SK range covering the whole reserved test year. Cleanup and the
+// post-test "pristine" assertion scope to THIS range, never the whole partition
+// (which may legitimately hold real sessions).
+export const TEST_ONLY_RANGE = { start: "2000-01-01", end: "2000-12-31" };
+
 // Raw low-level client — needed for control-plane commands like DescribeTable
 // that the DocumentClient does not wrap.
 export const raw = new DynamoDBClient({ region: REGION });

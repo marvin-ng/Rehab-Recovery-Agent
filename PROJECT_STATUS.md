@@ -783,3 +783,94 @@ explicitly **Part B**, once a deployed domain exists — deferred deliberately, 
 - `package.json`: `build:dashboard-data` script.
 - `web/` — the full Vite + React + TS + shadcn app (gitignored `dist/` and `.env.local`; committed
   `.env.example` with the non-secret Function URLs).
+
+---
+
+## Phase 5 (Part B) — CORS locked to production origin — ✅ COMPLETE (2026-07-21)
+Closes **D-19 for real** (it had been "deferred" through Phase 4 and Phase 5 Part A). The frontend is
+deployed at `https://rehab-recovery-agent.vercel.app`; both Function URLs now allow that origin only.
+
+### 1. Template change — ✅
+`infra/log-session-stack.yaml`: `AllowOrigins` on **both** Function URL resources changed from `["*"]`
+to `["https://rehab-recovery-agent.vercel.app"]` (exact match, https explicit, no trailing slash).
+Redeployed via the standard `aws cloudformation package` → `deploy` (stack → `UPDATE_COMPLETE`). Live
+config confirmed via `aws lambda get-function-url-config` — both show the single production origin
+(log-session: POST; dashboard-data: GET).
+
+### 2. CORS proof, both directions (the real evidence, not a claim) — ✅
+Preflight (`OPTIONS`) with `Access-Control-Request-Method`, comparing the real origin against a fake one:
+
+```
+###### DASHBOARD-DATA (GET) ######
+--- Origin: https://rehab-recovery-agent.vercel.app ---
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: https://rehab-recovery-agent.vercel.app
+Access-Control-Allow-Methods: GET
+--- Origin: https://evil.example.com ---
+HTTP/1.1 200 OK
+(no Access-Control-Allow-Origin header)
+
+###### LOG-SESSION (POST) ######
+--- Origin: https://rehab-recovery-agent.vercel.app ---
+HTTP/1.1 200 OK
+Access-Control-Allow-Origin: https://rehab-recovery-agent.vercel.app
+Access-Control-Allow-Methods: POST
+--- Origin: https://evil.example.com ---
+HTTP/1.1 200 OK
+(no Access-Control-Allow-Origin header)
+```
+
+The real origin is echoed back in `Access-Control-Allow-Origin`; the fake origin gets **no such header
+at all**. The request still returns HTTP 200 (Function URL CORS is advisory headers — enforcement is in
+the browser, not the server), but a browser will block `evil.example.com` because it is never granted.
+
+### 3. End-to-end from the DEPLOYED frontend (headless Chrome at the vercel.app origin) — ✅
+Driven in a real browser so the `Origin: https://rehab-recovery-agent.vercel.app` header is genuine and
+the browser actually enforces CORS. **Zero `Network.loadingFailed`/CORS-block events** in either flow:
+- **Dashboard (GET):** real data rendered, no auth gate — the allowed origin passes for the read path.
+- **Log Session (POST):** submitted through the deployed form → "Session logged." toast, item confirmed
+  in `rehab-sessions`, then deleted — the allowed origin passes for the write path.
+
+### 4. ⚠️ Incident + full recovery (recorded honestly) — RESOLVED
+During step 3 the write test was first run against **today's date (2026-07-21)**, which already held a
+**real logged session**. Because the Sessions sort key *is* the date, the handler's `PutItem`
+**overwrote** the real session with the minimal test log. Root cause: the test used the live "today"
+default instead of a throwaway date (the exact same-date-overwrite hazard the Part A plan had already
+flagged for its own write test).
+- **Recovery:** PITR was enabled on `rehab-sessions` (D-8). `LatestRestorableDateTime` (22:31:00Z)
+  predated the overwrite (`loggedAt` 22:34:19Z), so `restore-table-to-point-in-time
+  --use-latest-restorable-time` into a temp table `rehab-sessions-recovery` captured the intact
+  original. The `2026-07-21` item (same `sessionId` `f538f9d0…`, `loggedAt` `21:29:11Z`, all 9
+  exercises / 15 sides, notes, and AI tags `instability`/`fatigue`) was `PutItem`-copied back into
+  `rehab-sessions`; the temp table was deleted. Final live state verified: **Count 1**, the single
+  `2026-07-21` session restored byte-for-byte (`sessionId` matches).
+- **Re-test done safely:** step 3's write was re-run with a **throwaway empty date `2026-07-15`**
+  (verified empty first, deleted after), so the proof was obtained without risking real data.
+- **Lesson (carry forward):** any live write test against `rehab-sessions` MUST use a throwaway date —
+  a same-date log is a silent full-item overwrite, not a merge. PITR is the safety net and it worked,
+  but the primary guard is never writing a test payload to a date that may hold real data.
+- **Structural fix (not just documented):** the two verify harnesses that seed+delete synthetic
+  sessions (`scripts/verify-data.mjs`, `scripts/verify-logic.mjs`) previously anchored their dates to
+  **today / a real recent date** — running `npm run verify` today would have overwritten *and then
+  deleted-in-`finally`* the real 2026-07-21 session (with no PITR restore in the loop). Both now import a
+  shared **`TEST_ONLY_DATE` (`2000-06-15`)** + `TEST_ONLY_RANGE` (year-2000) from `scripts/lib/ddb.mjs`
+  and anchor every seeded date there, so test writes/deletes live in a namespace no real session can
+  ever occupy. Cleanup, the "most recent", "pristine", and logic read-back queries are all scoped to
+  `TEST_ONLY_RANGE` (`SK BETWEEN 2000-01-01 AND 2000-12-31`) instead of the whole partition — the
+  harnesses are now hermetic against real data. **Verified live:** both scripts pass with a real
+  session present, and that session (`sessionId f538f9d0…`, 9 exercises) is byte-for-byte unchanged
+  afterward. This closes the mistake class structurally, not just in prose.
+
+### 5. Known limitation — Vercel preview deployments (intentional scope, not an oversight)
+CORS now allows **only** the production domain `https://rehab-recovery-agent.vercel.app`. Vercel gives
+every non-`main` branch/preview build its **own random domain** (e.g.
+`rehab-recovery-agent-git-<branch>-<scope>.vercel.app`), which is **not** in the allowlist and will be
+blocked by CORS in the browser. This is **deliberate** for a single-developer project: a wildcard or a
+`*.vercel.app` suffix match would re-open the origin to any Vercel-hosted site, defeating the lock. If a
+preview URL ever needs to reach the live backend, add that exact origin to `AllowOrigins` for the
+duration — don't broaden the pattern. Not needed for this build.
+
+### D-19 — CLOSED (2026-07-21)
+Wildcard CORS existed as a deliberate placeholder from Phase 4 (no known frontend origin) through
+Phase 5 Part A (no deployed domain yet). With the production Vercel domain live, both Function URLs are
+locked to it exactly. No longer deferred.
