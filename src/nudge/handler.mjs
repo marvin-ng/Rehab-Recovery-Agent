@@ -31,6 +31,11 @@ export const handler = async () => {
 
   const { daysSinceLastSession, shouldNudge } = checkMissedSession(Items, asOfDate);
 
+  // Logged on every invocation, nudge or not, so CloudWatch shows the real decision.
+  console.log(
+    `Nudge check: daysSinceLastSession=${daysSinceLastSession}, shouldNudge=${shouldNudge}`
+  );
+
   if (!shouldNudge) {
     return { nudged: false, daysSinceLastSession };
   }
