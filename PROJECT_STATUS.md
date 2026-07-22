@@ -548,11 +548,15 @@ value across tracked files returns nothing, and `.gitignore` carries `.secrets/`
   `package` returns in Phase 2 is fulfilled: a real artifact was uploaded to the new
   **`rehab-artifacts-790561527138`** bucket (the `rehab-` naming convention extended to the artifacts
   bucket and the `rehab-tagging` stack/function/role).
-- **D-12 (2026-07-21):** `/aws/lambda/rehab-tagging` log-group retention was set to **30 days**
-  manually via the console, and is **not yet reflected in `tagging-stack.yaml`**. Recorded as a known
-  infra-as-code gap: the template should declare the log group with `RetentionInDays: 30` explicitly
-  (and let the function depend on it) rather than rely on a manual console setting that could drift or
-  be reset on a redeploy. Not a design change — an IaC gap to close in a later template revision.
+- **D-12 (2026-07-21) — CLOSED (2026-07-22, Phase 6 Part A):** `/aws/lambda/rehab-tagging` log-group
+  retention was originally set to **30 days** manually via the console and **not reflected in
+  `tagging-stack.yaml`** — a known infra-as-code gap. **Now closed:** `tagging-stack.yaml` declares a
+  `TaggingLogGroup` (`AWS::Logs::LogGroup`, `RetentionInDays: 30`), `TaggingFunction` gains
+  `DependsOn: TaggingLogGroup`, and the role's `WriteLogs` statement was tightened to match the other
+  two stacks (dropped `logs:CreateLogGroup`, now only `CreateLogStream` + `PutLogEvents`, resource
+  suffix `:*`). Because the group already existed, it was deleted first (30-day ephemeral logs only),
+  race-guarded to empty, then recreated stack-managed via the proven `package`→`deploy` path. Verified
+  live — see the Phase 6 Part A section below.
 - **D-13 (2026-07-20):** All 7 Phase 3 thresholds live in `src/logic/thresholds.mjs` and nowhere
   else, so tuning means editing one file. Values and reasoning: `ADHERENCE_NUDGE_DAYS = 2` (one
   missed day is normal on a 3–4x/week plan; nudging at 2 catches a real gap without nagging).
@@ -658,6 +662,18 @@ value across tracked files returns nothing, and `.gitignore` carries `.secrets/`
   ideally SPF/DMARC) instead of a bare address — is out of scope for this single-user portfolio build;
   noted as a future improvement. For this build, delivery-to-account is proven; inbox placement is best
   handled by the recipient marking not-spam.
+- **D-25 (2026-07-22, Phase 6 Part A):** **Bedrock model invocation logging is intentionally a
+  documented CLI runbook, not IaC.** CloudFormation has **no resource type** for it — verified against
+  the live registry: `AWS::Bedrock::Guardrail` and `AWS::Bedrock::KnowledgeBase` resolve via
+  `describe-type`, but `AWS::Bedrock::ModelInvocationLoggingConfiguration` (and the shorter
+  `AWS::Bedrock::LoggingConfiguration`) return `TypeNotFoundException`. The setting is also
+  **account+region-level** (one config per region via `PutModelInvocationLoggingConfiguration`), not a
+  per-stack resource, so no stack could own it even if a type existed. Rather than leave it as a silent
+  manual step, the exact recreation steps (log group, delivery IAM role with its precise trust +
+  permissions policies, the enable call, and a verify) are captured as a **runbook** in the Phase 6
+  Part A section below, keyed to the live config. The AWS **CLI** does support it, so the runbook is CLI
+  commands, not console click-through. If AWS later ships a CloudFormation resource type, migrate it
+  into a stack and retire the runbook.
 
 ### Teardown note (recorded, not acted on)
 `DeletionProtectionEnabled: true` + `DeletionPolicy: Retain` mean deleting `rehab-data` first requires
@@ -874,3 +890,154 @@ duration — don't broaden the pattern. Not needed for this build.
 Wildcard CORS existed as a deliberate placeholder from Phase 4 (no known frontend origin) through
 Phase 5 Part A (no deployed domain yet). With the production Vercel domain live, both Function URLs are
 locked to it exactly. No longer deferred.
+
+---
+
+## Phase 6 (Part A) — IaC hardening: close two long-standing gaps ✅ COMPLETE (2026-07-22)
+No new features, no new Lambdas. Two settings that lived only in the AWS Console — and would silently
+vanish on a clean redeploy from an empty account — are now either codified (D-12) or captured as an
+exact runbook (Bedrock logging, D-25). Then the whole deploy was re-proven healthy and least-privilege.
+
+### 1. D-12 closed — tagging log group is now IaC — ✅
+`infra/tagging-stack.yaml` now declares `TaggingLogGroup` (`AWS::Logs::LogGroup`, `RetentionInDays:
+30`), adds `DependsOn: TaggingLogGroup` to `TaggingFunction`, and tightens the role's `WriteLogs`
+statement (dropped `logs:CreateLogGroup` — CFN owns the group now — keeping `CreateLogStream` +
+`PutLogEvents`, resource suffix `:*`), matching `log-session-stack.yaml` / `notify-stack.yaml`.
+
+**Deploy sequence (the group already existed, so a plain add would 409 "already exists"):**
+1. `aws logs delete-log-group --log-group-name /aws/lambda/rehab-tagging --region us-east-1` — removed
+   the orphaned manual group (30-day ephemeral operational logs only; no persisted data there).
+2. **Race guard:** `aws logs describe-log-groups --log-group-name-prefix /aws/lambda/rehab-tagging`
+   returned `[]` (empty) — confirmed nothing re-invoked the Lambda and recreated the group in the
+   window before deploying. (If it had been non-empty, the rule was: stop, re-delete, re-check — never
+   deploy on top of a recreated group.)
+3. `npm run build:tagging` → `aws cloudformation package` (bucket `rehab-artifacts-790561527138`) →
+   `aws cloudformation deploy --capabilities CAPABILITY_NAMED_IAM --no-fail-on-empty-changeset`.
+
+**Verified live — immediately post-deploy:**
+- Stack `rehab-tagging` → **UPDATE_COMPLETE**.
+- `describe-log-groups` → retention **30**.
+- `describe-stack-resources` → the group is now a stack resource: `TaggingLogGroup` /
+  `/aws/lambda/rehab-tagging` / **CREATE_COMPLETE** (i.e. stack-managed, not console drift).
+
+**Verified live — durability after REAL traffic (a stronger claim than post-create):** ran
+`npm run verify:tagging` (5 live invocations of the deployed Lambda, all PASS incl. the case-e
+adversarial boundary proof). Re-checked afterward: retention still **30**, still the **same**
+stack-managed `TaggingLogGroup`, and a real log stream (`2026/07/22/[$LATEST]…`) was written into it.
+Real Lambda traffic logs into the CFN-managed group without detaching it or resetting retention —
+proving the group *stays* stack-managed after use, not just at creation. (The tagging Lambda writes no
+DynamoDB items, so the test invokes left nothing to clean up.)
+
+### 2. Bedrock model invocation logging — runbook (D-25), because CloudFormation can't own it — ✅
+**First checked:** does CloudFormation support a resource type for this? **No** — verified against the
+live registry with `describe-type`: `AWS::Bedrock::Guardrail` and `AWS::Bedrock::KnowledgeBase` resolve,
+but `AWS::Bedrock::ModelInvocationLoggingConfiguration` and `AWS::Bedrock::LoggingConfiguration` both
+return `TypeNotFoundException`. It is also an **account+region-level** setting (one per region), not a
+per-stack resource. So it cannot be codified; instead here is the exact runbook to recreate the live
+setup (`/aws/bedrock/recovery-watcher` + `BedrockLoggingRole-RecoveryWatcher`) from an empty account.
+The AWS **CLI** supports every step, so this is CLI, not console click-through. Region `us-east-1`,
+account `790561527138` throughout.
+
+**Runbook — recreate Bedrock model invocation logging from scratch:**
+
+Step 1 — create the destination log group (retention 30, matching everything else):
+```
+aws logs create-log-group --log-group-name /aws/bedrock/recovery-watcher --region us-east-1
+aws logs put-retention-policy --log-group-name /aws/bedrock/recovery-watcher \
+  --retention-in-days 30 --region us-east-1
+```
+
+Step 2 — create the delivery IAM role Bedrock assumes to write those logs. Trust policy
+(`bedrock-logging-trust.json`) — scoped with the SourceAccount/SourceArn confused-deputy guards:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AmazonBedrockModelInvocationCWDeliveryRole",
+    "Effect": "Allow",
+    "Principal": { "Service": "bedrock.amazonaws.com" },
+    "Action": "sts:AssumeRole",
+    "Condition": {
+      "StringEquals": { "aws:SourceAccount": "790561527138" },
+      "ArnLike": { "aws:SourceArn": "arn:aws:bedrock:us-east-1:790561527138:*" }
+    }
+  }]
+}
+```
+Permissions policy (`bedrock-logging-perms.json`) — write only to that one log group's
+model-invocations stream:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "AmazonBedrockModelInvocationCWDeliveryRole",
+    "Effect": "Allow",
+    "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+    "Resource": "arn:aws:logs:us-east-1:790561527138:log-group:/aws/bedrock/recovery-watcher:log-stream:aws/bedrock/modelinvocations"
+  }]
+}
+```
+Create + attach:
+```
+aws iam create-role --role-name BedrockLoggingRole-RecoveryWatcher \
+  --assume-role-policy-document file://bedrock-logging-trust.json
+aws iam put-role-policy --role-name BedrockLoggingRole-RecoveryWatcher \
+  --policy-name BedrockLoggingRole-RecoveryWatcher-policy \
+  --policy-document file://bedrock-logging-perms.json
+```
+(The live role attaches this as a managed `service-role/…` policy created by the console; a plain inline
+`put-role-policy` is functionally identical and simpler to script from scratch.)
+
+Step 3 — enable model invocation logging pointing at that group + role:
+```
+aws bedrock put-model-invocation-logging-configuration --region us-east-1 \
+  --logging-config '{
+    "cloudWatchConfig": {
+      "logGroupName": "/aws/bedrock/recovery-watcher",
+      "roleArn": "arn:aws:iam::790561527138:role/BedrockLoggingRole-RecoveryWatcher"
+    },
+    "textDataDeliveryEnabled": true,
+    "imageDataDeliveryEnabled": true,
+    "embeddingDataDeliveryEnabled": true,
+    "videoDataDeliveryEnabled": true,
+    "audioDataDeliveryEnabled": false
+  }'
+```
+
+Step 4 — verify it took:
+```
+aws bedrock get-model-invocation-logging-configuration --region us-east-1
+```
+Expect the config above echoed back. **Confirmed live this phase** — the current account already
+returns exactly this (log group `/aws/bedrock/recovery-watcher`, role
+`BedrockLoggingRole-RecoveryWatcher`, text/image/embedding/video on, audio off). This runbook was
+**not re-run against the live account** (that would be a no-op); it was authored by reading the live
+config back and is the source of truth for a from-scratch rebuild.
+
+### 3. Full-stack re-verify — ✅
+**Stack health** (`describe-stacks`, all `rehab*`): `rehab-data` CREATE_COMPLETE, `rehab-tagging`
+UPDATE_COMPLETE (this phase), `rehab-log-session` UPDATE_COMPLETE, `rehab-notify` CREATE_COMPLETE.
+Nothing drifted.
+
+**Least-privilege spot-check** via `iam simulate-principal-policy` (same method as Phase 0/4 — evaluates
+the real attached policy, not the template). For each role: intended actions **allowed**, a
+representative out-of-scope action **implicitDeny**. All 18 as expected:
+
+| Role | allowed | implicitDeny (out of scope) |
+|------|---------|------------------------------|
+| `rehab-tagging-role` | `dynamodb:GetItem` (program), `bedrock:InvokeModel` (nova-lite profile) | `dynamodb:PutItem` (program) |
+| `rehab-log-session-role` | `dynamodb:PutItem` (sessions), `lambda:InvokeFunction` (tagging) | `dynamodb:Query` (sessions) |
+| `rehab-dashboard-data-role` | `dynamodb:Query` (program + sessions) | `dynamodb:PutItem` (sessions) |
+| `rehab-nudge-role` | `dynamodb:Query` (sessions), `ses:SendEmail` | `dynamodb:PutItem` (sessions) |
+| `rehab-digest-role` | `dynamodb:Query` (program + sessions), `ses:SendEmail` | `dynamodb:PutItem` (sessions) |
+| `rehab-scheduler-role` | `lambda:InvokeFunction` (nudge + digest) | — |
+
+Plus a targeted check that the D-12 IAM tightening took effect on `rehab-tagging-role`:
+`logs:CreateLogGroup` → **implicitDeny** (correctly removed), while `logs:CreateLogStream` /
+`logs:PutLogEvents` → **allowed**. The durability test above already proved the Lambda still logs fine
+without `CreateLogGroup`, since CloudFormation now owns the group.
+
+### Artifacts changed this phase
+- `infra/tagging-stack.yaml` — `TaggingLogGroup` resource, `DependsOn`, tightened `WriteLogs`.
+- `PROJECT_STATUS.md` — this section; D-12 marked CLOSED; new **D-25** (Bedrock logging runbook).
+- No new Lambdas, no code changes, no CLAUDE.md change (nothing here contradicts a locked decision).

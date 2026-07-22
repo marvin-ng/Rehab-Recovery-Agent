@@ -40,17 +40,29 @@ Resources:
                   - arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0
                   - arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-lite-v1:0
                   - arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-lite-v1:0
-              # CloudWatch Logs for the function's own log group.
+              # CloudWatch Logs for the function's own log group. The group itself
+              # is declared as an IaC resource below (TaggingLogGroup), so this role
+              # no longer needs logs:CreateLogGroup — only stream/put into it. Matches
+              # the WriteLogs pattern in log-session-stack.yaml / notify-stack.yaml.
               - Sid: WriteLogs
                 Effect: Allow
                 Action:
-                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rehab-tagging*
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/rehab-tagging:*
+
+  # Declared explicitly (30-day retention) so log config lives in IaC, not
+  # console drift (closes the D-12 gap for the tagging function — same pattern as
+  # log-session-stack.yaml and notify-stack.yaml).
+  TaggingLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/rehab-tagging
+      RetentionInDays: 30
 
   TaggingFunction:
     Type: AWS::Lambda::Function
+    DependsOn: TaggingLogGroup
     Properties:
       FunctionName: rehab-tagging
       Runtime: nodejs22.x
