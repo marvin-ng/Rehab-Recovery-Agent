@@ -7,6 +7,12 @@ import type {
   LogSessionSide,
   Side,
 } from "@/lib/types";
+import {
+  sidesFor,
+  todayLocalISO,
+  type SessionFormState,
+  type SideState,
+} from "@/lib/session-form";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
@@ -20,32 +26,29 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-// Per-side entry state: whether it was completed and the free-text note.
-type SideState = { completed: boolean; rawNote: string };
-type FormState = Record<string, Partial<Record<Side, SideState>>>;
-
-function sidesFor(item: ProgramItem): Side[] {
-  return item.perSide ? ["left", "right"] : ["n-a"];
-}
-
-function todayLocalISO(): string {
-  const d = new Date();
-  const off = d.getTimezoneOffset();
-  return new Date(d.getTime() - off * 60_000).toISOString().slice(0, 10);
-}
-
+// This view is fully controlled: the in-progress session lives in App so it
+// survives this component being unmounted on a tab switch. Nothing entered
+// here may be held in local state.
 export function LogSession({
   programItems,
+  value,
+  onChange,
+  onSubmitted,
   onUnauthorized,
 }: {
   programItems: ProgramItem[];
+  value: SessionFormState;
+  onChange: (next: SessionFormState) => void;
+  onSubmitted: () => void;
   onUnauthorized: () => void;
 }) {
-  const [sessionDate, setSessionDate] = useState(todayLocalISO());
-  const [pain, setPain] = useState(0);
-  const [stiffness, setStiffness] = useState(0);
-  const [confidence, setConfidence] = useState(5);
+  const { sessionDate, pain, stiffness, confidence, form } = value;
   const [submitting, setSubmitting] = useState(false);
+
+  const setField = <K extends keyof SessionFormState>(
+    key: K,
+    v: SessionFormState[K]
+  ) => onChange({ ...value, [key]: v });
 
   // Group active exercises by section, preserving order of first appearance.
   const sections = useMemo(() => {
@@ -57,26 +60,17 @@ export function LogSession({
     return [...map.entries()];
   }, [programItems]);
 
-  // Initialise every side to not-completed / empty note.
-  const [form, setForm] = useState<FormState>(() => {
-    const init: FormState = {};
-    for (const item of programItems) {
-      init[item.exerciseId] = {};
-      for (const side of sidesFor(item)) {
-        init[item.exerciseId][side] = { completed: false, rawNote: "" };
-      }
-    }
-    return init;
-  });
-
   function updateSide(exerciseId: string, side: Side, patch: Partial<SideState>) {
-    setForm((prev) => ({
-      ...prev,
-      [exerciseId]: {
-        ...prev[exerciseId],
-        [side]: { ...prev[exerciseId]?.[side], ...patch } as SideState,
+    onChange({
+      ...value,
+      form: {
+        ...form,
+        [exerciseId]: {
+          ...form[exerciseId],
+          [side]: { ...form[exerciseId]?.[side], ...patch } as SideState,
+        },
       },
-    }));
+    });
   }
 
   async function handleSubmit() {
@@ -111,6 +105,8 @@ export function LogSession({
         confidenceRating: confidence,
       });
       toast.success("Session logged.");
+      // Clear ONLY here — on a real, successful write. Never on a tab switch.
+      onSubmitted();
     } catch (err) {
       if (err instanceof UnauthorizedError) {
         onUnauthorized();
@@ -133,7 +129,7 @@ export function LogSession({
             type="date"
             value={sessionDate}
             max={todayLocalISO()}
-            onChange={(e) => setSessionDate(e.target.value)}
+            onChange={(e) => setField("sessionDate", e.target.value)}
             className="w-48"
           />
         </CardContent>
@@ -201,9 +197,21 @@ export function LogSession({
           <CardTitle>How did it feel? (0–10)</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-8">
-          <RatingSlider label="Pain" value={pain} onChange={setPain} />
-          <RatingSlider label="Stiffness" value={stiffness} onChange={setStiffness} />
-          <RatingSlider label="Confidence" value={confidence} onChange={setConfidence} />
+          <RatingSlider
+            label="Pain"
+            value={pain}
+            onChange={(n) => setField("pain", n)}
+          />
+          <RatingSlider
+            label="Stiffness"
+            value={stiffness}
+            onChange={(n) => setField("stiffness", n)}
+          />
+          <RatingSlider
+            label="Confidence"
+            value={confidence}
+            onChange={(n) => setField("confidence", n)}
+          />
         </CardContent>
       </Card>
 

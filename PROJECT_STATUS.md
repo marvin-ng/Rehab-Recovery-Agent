@@ -674,6 +674,13 @@ value across tracked files returns nothing, and `.gitignore` carries `.secrets/`
   Part A section below, keyed to the live config. The AWS **CLI** does support it, so the runbook is CLI
   commands, not console click-through. If AWS later ships a CloudFormation resource type, migrate it
   into a stack and retire the runbook.
+- **D-26 (2026-07-23, post-build):** **In-progress Log Session form state lives in `App`, above
+  `<Tabs>` — never inside `LogSession`.** Base UI unmounts inactive `TabsContent`, so any `useState`
+  held inside `LogSession` is destroyed on every tab switch, silently wiping a part-completed log.
+  Found through real personal use, not a build phase. The form is now fully controlled from `App` and
+  is cleared **only** after a successful submit. Anyone adding a field to this form must add it to
+  `SessionFormState` in `web/src/lib/session-form.ts`, not to local component state. See the post-build
+  section at the end of this file.
 
 ### Teardown note (recorded, not acted on)
 `DeletionProtectionEnabled: true` + `DeletionPolicy: Retain` mean deleting `rehab-data` first requires
@@ -1041,3 +1048,110 @@ without `CreateLogGroup`, since CloudFormation now owns the group.
 - `infra/tagging-stack.yaml` — `TaggingLogGroup` resource, `DependsOn`, tightened `WriteLogs`.
 - `PROJECT_STATUS.md` — this section; D-12 marked CLOSED; new **D-25** (Bedrock logging runbook).
 - No new Lambdas, no code changes, no CLAUDE.md change (nothing here contradicts a locked decision).
+
+---
+
+## Post-build — bugs found in real personal use (2026-07-23)
+
+Not a build phase. These came out of **actually using the finished tool** to log real sessions, which
+is a different kind of testing than any phase gate applied: the phases proved each piece worked when
+exercised directly, but nobody had sat down and used the app the way a person uses it across several
+days. Recorded here because the distinction matters — a build that passes every phase check can still
+have a defect that only appears under real use.
+
+### 1. Tab switch silently destroyed a part-completed session log — ✅ FIXED
+
+**Symptom.** Fill in part of a session on the Log Session tab, flip to Dashboard to compare against
+the previous workout, flip back — everything entered is gone. Checkboxes, per-side notes, the session
+date, and all three rating sliders reset to defaults. No warning, no toast, nothing to indicate the
+entry had been discarded.
+
+**Cause.** `LogSession` held the whole in-progress log in its own `useState`. Base UI's `Tabs`
+**unmounts inactive `TabsContent`**, so switching tabs unmounted the component and destroyed that
+state; switching back mounted a fresh one with the initialiser's all-empty values. Nothing to do with
+the checkbox component, the API layer, or the backend — purely where the state lived.
+
+Reproduced live in real Chrome against the real dev build before fixing:
+```
+after checking all:      15/15 checked
+while on Dashboard tab:  0 checkboxes still in DOM (unmounted)
+after switching back:    0/15 checked
+submit -> request sent: NO
+toast: "Nothing to log — check at least one exercise or add a note."
+```
+Partial entry died the same way — check 8, round-trip the tabs, get 0.
+
+**Fix.** Lifted the state up (D-26). New `web/src/lib/session-form.ts` owns the `SessionFormState`
+shape and its helpers; `App` holds it above `<Tabs>` and passes `value`/`onChange` down; `LogSession`
+is now fully controlled and keeps **no** entry state of its own. Two details worth keeping:
+- `withProgramSeeded()` adds rows for exercises the physio adds later **without disturbing anything
+  already entered**, and returns the identical object when nothing is missing, so it is safe to call
+  from an effect. It preserves the original all-sides-seeded behaviour, which is what makes an
+  untouched side of a touched exercise persist as an explicit `completed: false` — the asymmetry
+  logic reads both sides, so this shape must not change.
+- The form is cleared in exactly one place: `onSubmitted`, after a successful write. Never on a tab
+  switch, never on a failed submit.
+
+**Verified live** (real Chrome driving the real dev build; both Function URLs intercepted, so no
+session was written to `rehab-sessions` on any date). 12/12 checks, plus a separate slider run:
+
+| Check | Result |
+|---|---|
+| 5 boxes + 2 notes + date `2026-07-19` survive a Dashboard round-trip | PASS |
+| State byte-identical after **three** consecutive round-trips | PASS |
+| Non-default ratings (pain 6, stiffness 4, confidence 2) survive a round-trip | PASS |
+| Those ratings arrive in the payload as `pain=6 stiffness=4 confidence=2` | PASS |
+| Submit after a round-trip sends all 15 sides, all `true` | PASS |
+| A note entered before the round-trip reaches the payload | PASS |
+| Form cleared after a **successful** submit (boxes, notes, ratings→`0,0,5`) | PASS |
+| Form **preserved** after a simulated 500 — nothing lost | PASS |
+| "Nothing to log" guard still fires on an empty form, no request sent | PASS |
+
+### 2. Three right-side `completed: false` values — investigated, no defect found, left open
+
+**Symptom.** The Dashboard "Done" column read 13 / 13 / 14 for 2026-07-23 / 07-22 / 07-21 against an
+expected max of 15 (6 per-side exercises × 2 + 3 single-side), despite a recollection of having
+checked every exercise on every side.
+
+**Both candidate explanations were ruled out by tracing the whole path:**
+
+- **Not a display/counting bug.** `Dashboard.tsx` counts side-entries whose `completed` is truthy;
+  `dashboard-data/handler.mjs` normalises with `completed: sideObj?.completed === true` before it
+  reaches the browser. The rendered numbers match storage exactly. The history table is newest-first,
+  so reading the column top-to-bottom gives 13, 13, 14 — a faithful render of stored trues 13, 13, 14.
+- **Not a persistence bug.** Raw DynamoDB items (read-only scan) show genuine `{"BOOL": false}` values:
+  `single_leg_rdl/right` on 07-21, and `single_leg_squat_step_down/right` + `standing_wall_hip_adduction/right`
+  on 07-23. 07-22 stored only 13 side-entries with **zero** falses — `face_pulls` and `push_up_plus`
+  are absent entirely, which is the form's documented "untouched exercise is omitted" behaviour, and is
+  itself end-to-end proof through the live Function URL and Lambda that a checked box persists as `true`.
+
+**Live tracing found no mechanism that drops a checked box.** Real Chrome, real dev build, real program
+data, capturing the actual outgoing POST body: all 15 checked → all 15 arrive `true`. Nine scenarios
+passed — sequential clicks, label clicks, rapid sequential clicks at 0/15/30/60/120ms, note-then-check,
+check-then-note, date change after checking, slider change after checking, and **mobile viewport with
+real touch events** (tap target measured at ~40×32px via the `::after` expansion, over the WCAG 2.5.8
+24×24 minimum). A single click was confirmed never to double-toggle: 0 anomalies across all 15. The one
+apparent failure — 15 *simultaneous* `Promise.all` clicks losing most of them — is a harness artifact
+(one pointer, raced actionability checks), not reachable by a human.
+
+**Left as an open, low-priority note, deliberately not "fixed."** Nothing in the code explains it, so
+there is nothing to change; the most likely explanation is a real-world missed tap on the day. Writing
+speculative code against an unreproduced symptom would be worse than leaving it recorded. If the same
+right-side pattern recurs across future sessions, revisit — a repeat would be evidence of something
+real, whereas three isolated ones are not. Worth noting the `right` sides sit in the second column on
+desktop and stack lower on mobile, so a missed tap there is plausible.
+
+**Latent issue spotted while investigating, not acted on:** `LogSession` passes `id={cbId}` to
+`Checkbox`, but Base UI overrides it with its own generated id (`base-ui-_r_5_`), so the
+`<Label htmlFor={cbId}>` association points at an id that does not exist. Label clicks still check the
+box empirically (verified — 15/15 via labels), so this is not a functional bug, but the accessible
+label association is not what the code appears to say. Low priority; recorded so it is not rediscovered.
+
+### Artifacts changed
+- `web/src/lib/session-form.ts` — **new.** `SessionFormState`, `sidesFor`, `todayLocalISO`,
+  `emptyForm`, `emptySessionForm`, `withProgramSeeded`.
+- `web/src/views/LogSession.tsx` — now fully controlled; local entry state and the duplicated
+  `sidesFor`/`todayLocalISO` helpers removed; clears via `onSubmitted` only.
+- `web/src/App.tsx` — owns `sessionForm` above `<Tabs>`; seeds it from `programItems` on load.
+- `PROJECT_STATUS.md` — this section; new **D-26**.
+- No backend, infra, or CLAUDE.md change. `tsc -b` clean, `oxlint` clean (no new warnings).

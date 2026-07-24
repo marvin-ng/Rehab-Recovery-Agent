@@ -12,6 +12,11 @@ import {
   UnauthorizedError,
 } from "@/lib/api";
 import type { DashboardPayload } from "@/lib/types";
+import {
+  emptySessionForm,
+  withProgramSeeded,
+  type SessionFormState,
+} from "@/lib/session-form";
 
 export default function App() {
   const [hasKey, setHasKey] = useState<boolean>(() => Boolean(getApiKey()));
@@ -19,6 +24,20 @@ export default function App() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loadError, setLoadError] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
+
+  // The in-progress session log. Held HERE, above <Tabs>, because Base UI
+  // unmounts inactive TabsContent — state inside LogSession is destroyed on
+  // every tab switch. Cleared only after a successful submit.
+  const [sessionForm, setSessionForm] = useState<SessionFormState>(() =>
+    emptySessionForm([])
+  );
+
+  // Seed rows for the real program once it loads (and for anything the physio
+  // adds later) without touching what has already been entered.
+  useEffect(() => {
+    if (!data) return;
+    setSessionForm((prev) => withProgramSeeded(prev, data.programItems));
+  }, [data]);
 
   // Any 401 anywhere funnels here: drop the key, re-show the gate with an error.
   const handleUnauthorized = useCallback(() => {
@@ -107,6 +126,9 @@ export default function App() {
             {data ? (
               <LogSession
                 programItems={data.programItems}
+                value={sessionForm}
+                onChange={setSessionForm}
+                onSubmitted={() => setSessionForm(emptySessionForm(data.programItems))}
                 onUnauthorized={handleUnauthorized}
               />
             ) : (
