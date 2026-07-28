@@ -64,9 +64,14 @@ async function queryProgram() {
   return Items;
 }
 
-// Trim a stored Session item to what a history view needs: ratings plus, per
-// exercise, each present side's completed flag, raw note, and tags. Newest
-// first is applied by the caller (DynamoDB returns ascending by SK).
+// Trim a stored Session item to what a history view needs: ratings, the
+// whole-session generalNote, plus, per exercise, each present side's completed
+// flag, raw note, and tags. Newest first is applied by the caller (DynamoDB
+// returns ascending by SK).
+//
+// generalNote is relayed VERBATIM and carries no tags — it is never classified
+// (see D-27). Sessions logged before this field existed simply have none, hence
+// the "" fallback.
 function toRecentSession(item) {
   const exercises = (item.completedExercises || []).map((ex) => {
     const sides = {};
@@ -84,6 +89,7 @@ function toRecentSession(item) {
     painRating: item.painRating,
     stiffnessRating: item.stiffnessRating,
     confidenceRating: item.confidenceRating,
+    generalNote: typeof item.generalNote === "string" ? item.generalNote : "",
     exercises,
   };
 }

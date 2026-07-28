@@ -22,6 +22,7 @@ import { Label } from "@/components/ui/label";
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -42,7 +43,7 @@ export function LogSession({
   onSubmitted: () => void;
   onUnauthorized: () => void;
 }) {
-  const { sessionDate, pain, stiffness, confidence, form } = value;
+  const { sessionDate, pain, stiffness, confidence, generalNote, form } = value;
   const [submitting, setSubmitting] = useState(false);
 
   const setField = <K extends keyof SessionFormState>(
@@ -103,6 +104,8 @@ export function LogSession({
         painRating: pain,
         stiffnessRating: stiffness,
         confidenceRating: confidence,
+        // Sent exactly as typed — deliberately not trimmed, not tagged.
+        generalNote,
       });
       toast.success("Session logged.");
       // Clear ONLY here — on a real, successful write. Never on a tab switch.
@@ -211,6 +214,28 @@ export function LogSession({
             label="Confidence"
             value={confidence}
             onChange={(n) => setField("confidence", n)}
+          />
+        </CardContent>
+      </Card>
+
+      {/* Whole-session note — optional, never tagged, relayed verbatim (D-27). */}
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            <Label htmlFor="general-note">Anything else about this session?</Label>
+          </CardTitle>
+          <CardDescription>
+            Not tied to one specific exercise. Optional — leave blank if there's
+            nothing to add.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Textarea
+            id="general-note"
+            placeholder="How the session went overall, sleep, workload, anything worth remembering…"
+            value={generalNote}
+            onChange={(e) => setField("generalNote", e.target.value)}
+            rows={3}
           />
         </CardContent>
       </Card>

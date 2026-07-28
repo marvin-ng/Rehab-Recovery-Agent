@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 import {
   CartesianGrid,
   Line,
@@ -257,23 +257,46 @@ export function Dashboard({
                         Object.values(ex.sides).filter((v) => v?.completed).length,
                       0
                     );
+                    const hasGeneralNote = s.generalNote?.trim().length > 0;
                     return (
-                      <TableRow key={s.sessionDate}>
-                        <TableCell className="font-medium">{s.sessionDate}</TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {s.painRating}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {s.stiffnessRating}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">
-                          {s.confidenceRating}
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums">{done}</TableCell>
-                        <TableCell className="max-w-xs truncate text-muted-foreground">
-                          {notes || "—"}
-                        </TableCell>
-                      </TableRow>
+                      <Fragment key={s.sessionDate}>
+                        <TableRow>
+                          <TableCell className="font-medium">{s.sessionDate}</TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {s.painRating}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {s.stiffnessRating}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">
+                            {s.confidenceRating}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">{done}</TableCell>
+                          <TableCell
+                            className="max-w-xs truncate text-muted-foreground"
+                            title={notes || undefined}
+                          >
+                            {notes || "—"}
+                          </TableCell>
+                        </TableRow>
+                        {/* The whole-session note gets its own full-width row so
+                            it is shown IN FULL — never truncated away, never
+                            summarised. Rendered exactly as stored (D-27). */}
+                        {hasGeneralNote ? (
+                          <TableRow>
+                            <TableCell colSpan={6} className="pt-0">
+                              <div className="rounded-md border border-dashed p-3 text-sm">
+                                <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                                  Session note
+                                </div>
+                                <p className="whitespace-pre-wrap break-words">
+                                  {s.generalNote}
+                                </p>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ) : null}
+                      </Fragment>
                     );
                   })}
                 </TableBody>

@@ -681,6 +681,25 @@ value across tracked files returns nothing, and `.gitignore` carries `.secrets/`
   is cleared **only** after a successful submit. Anyone adding a field to this form must add it to
   `SessionFormState` in `web/src/lib/session-form.ts`, not to local component state. See the post-build
   section at the end of this file.
+- **D-27 (2026-07-28):** **`generalNote` is a verbatim relay — never tagged, never summarised, by
+  design, not by omission.** The whole-session note is stored as typed, returned as stored, and printed
+  in the digest exactly as written. It is deliberately excluded from the Bedrock tagging path: no
+  `tags` array, no `symptomType`, no `severity`, and the log-session handler makes **no** `rehab-tagging`
+  invocation for it under any circumstance (proven live — see the feature section at the end of this
+  file). Rationale: the tagging Lambda's whole contract is `(known exerciseId, known side, note) →
+  classification`; a note that is explicitly *not* tied to an exercise or a side has no valid input for
+  it, so classifying it would mean inventing an exercise/side context that the user never gave. And in
+  the digest it is the one place in the email that is the user's **own words**, not the system's
+  narration — summarising it would put a model between Marvin and his own note, which is exactly the
+  kind of silent interpretation the clinical boundary exists to prevent. **If a future task proposes
+  summarising, rewording, or merging this section, that is a deviation from this locked decision and
+  must be flagged, not silently added.** The hard rule is restated in-code in `src/digest/handler.mjs`
+  and `src/log-session/handler.mjs` so it is visible at the point of change, not only here.
+  **Boundary check (considered, not glossed over):** D-14 says escalation observations never embed the
+  raw free-text note, and that still holds — escalations are still built from structured/enum fields
+  only, and the notes block is a separate, clearly-labelled section. Relaying Marvin's own sentence back
+  to Marvin unchanged generates no clinical content; the boundary constrains what the *agent* writes,
+  and here the agent writes nothing.
 
 ### Teardown note (recorded, not acted on)
 `DeletionProtectionEnabled: true` + `DeletionPolicy: Retain` mean deleting `rehab-data` first requires
@@ -1155,3 +1174,125 @@ label association is not what the code appears to say. Low priority; recorded so
 - `web/src/App.tsx` — owns `sessionForm` above `<Tabs>`; seeds it from `programItems` on load.
 - `PROJECT_STATUS.md` — this section; new **D-26**.
 - No backend, infra, or CLAUDE.md change. `tsc -b` clean, `oxlint` clean (no new warnings).
+
+---
+
+## Feature — general (non-exercise-specific) session note ✅ COMPLETE (2026-07-28)
+
+Not a build phase. One new optional field, `generalNote`: a plain whole-session note for anything that
+isn't tied to a single exercise ("slept badly", "gym was packed", "rushed it"). It threads through the
+full stack — form → log-session → Sessions table → dashboard-data → Dashboard history → weekly/monthly
+digest email — and at every hop it is carried **verbatim**. It is the only user text in the system that
+never touches Bedrock. The design decision behind that is **D-27**; this section is the live proof.
+
+### What changed
+
+| Layer | Change |
+|---|---|
+| Sessions item | New optional top-level `generalNote` (plain string). No `tags`, no `symptomType`, no `severity`. No infra change — DynamoDB is schemaless past the keys, so `data-stack.yaml` is untouched. |
+| `src/log-session/handler.mjs` | Accepts `generalNote`; fail-loud `generalNote must be a string when present` (absent is fine, wrong type is not — same discipline as every other field). Stored untrimmed. **No `tagNote()` call on this path, ever.** |
+| `src/dashboard-data/handler.mjs` | `toRecentSession` emits `generalNote` verbatim; `""` for sessions logged before the field existed. |
+| `src/digest/handler.mjs` | New `collectGeneralNotes()` + a `NOTES YOU ADDED THIS WEEK:` / `THIS MONTH:` block placed **directly after** the escalations section. Omitted entirely when no session in the window has one. Return value gained `generalNoteCount`. |
+| `web/src/lib/session-form.ts` | `generalNote: string` added to `SessionFormState` + `emptySessionForm` — i.e. it lives in `App` above `<Tabs>`, per D-26, so it survives a tab switch like every other field. |
+| `web/src/views/LogSession.tsx` | New optional textarea in its own card, directly after the confidence slider. Sent as typed (not trimmed). |
+| `web/src/views/Dashboard.tsx` | Session history renders the note in a **full-width row of its own** under the session, `whitespace-pre-wrap`, never truncated. (The pre-existing per-exercise Notes column keeps its `truncate`, but gained a `title` tooltip so nothing there is silently lost either.) |
+
+**Cadence scoping reuse:** the digest's `escalationSessions` was renamed `cadenceSessions` and the notes
+block reads from that *same* filtered set. Weekly = last 7 days, monthly = the full window (D-22), so
+the "this week"/"this month" heading provably cannot drift from the sessions it lists.
+
+### Live verification (all against the real deployed stacks, real Function URLs, real tables)
+
+Deployed via the standard `aws cloudformation package` → `deploy`: `rehab-log-session` and
+`rehab-notify` both → `UPDATE_COMPLETE`. Test session on the throwaway date **2026-07-27** (verified
+empty first — the real sessions were 07-21/22/23/26/28), deleted afterwards.
+
+**1. Stored, verbatim — ✅** `POST` → `200 {ok:true}`. Read straight back out of DynamoDB with
+`get-item`; the em-dash, the `&`, and the embedded newline all survived intact:
+```
+{"S": "Slept badly & rushed the whole thing — felt flat overall, not sore.\nGym was packed, so the order was all over the place. Nothing to do with any one exercise."}
+```
+The per-side shape is unchanged (`completed`/`rawNote`/`tags`, `tags: []`) — `generalNote` sits beside
+it as a bare string with no tag structure of its own.
+
+**2. The tagging Lambda was never invoked — ✅ (this is the load-bearing check)**
+The test payload carried a `generalNote` and **empty** per-side `rawNote`s, so the only text in the
+request was the general note. Timestamp `T0` recorded immediately before the POST:
+```
+rehab-tagging REPORT lines since T0: 0
+```
+**Control, to prove that counter is actually live** rather than trivially zero: a second session posted
+through the *same endpoint* with a real per-exercise note (`"mild tightness on the left through the
+hamstring"`) →
+```
+rehab-tagging REPORT lines since T1: 1
+tags: [{symptomType: "tightness", severity: "mild", flagForReview: false}]
+```
+Same endpoint, same handler, one path classifies and one provably does not. Confirmed independently by
+the CloudWatch `AWS/Lambda Invocations` metric for `rehab-tagging` over the whole 21:14–21:25Z window:
+**Sum = 1** — the control POST only. The control session was deleted immediately.
+
+**3. Dashboard history, verbatim — ✅** `GET` on the dashboard-data Function URL returned the note
+**byte-for-byte identical** to what the form sent (`got == sent` → `True`); the five pre-existing
+sessions correctly returned `""`. Then rendered in **real headless Chrome** against the real dev build
+and the real live endpoints:
+```
+rendered note repr: "Slept badly & rushed the whole thing — felt flat overall, not sore.\nGym was packed, ...one exercise."
+VERBATIM match vs stored: true
+truncated/ellipsised?:    false
+```
+The new field also passed the D-26 hazard explicitly — textarea confirmed **unmounted** while on the
+Dashboard tab, and its multi-line value came back byte-identical on return:
+```
+value before switch : "tab-switch survival probe — line one\nline two"
+value after  switch : "tab-switch survival probe — line one\nline two"   SURVIVED: true
+```
+Field position asserted programmatically, not by eye: `afterConfidenceSlider: true`.
+*(Honest caveat: Chrome ran with `--disable-web-security` in a throwaway profile so `localhost:5199`
+could reach the CORS-locked Function URLs. The CORS lock itself is unchanged by this feature and stays
+proven by Phase 5 Part B; disabling it locally only affects the browser doing the render check.)*
+
+**4. Weekly digest email, verbatim — ✅** The **real deployed `rehab-digest` Lambda** was invoked
+manually and really sent the email: `{"digestType":"weekly","escalationCount":1,"generalNoteCount":1,
+"includedTrend":false}`. The exact composed body was then captured by running the **same deployed
+bundle** (`dist/digest/index.js` — the artifact CloudFormation uploaded) in-process with only the SES
+`send` intercepted, so no logic was mirrored or re-implemented:
+```
+Weekly rehab summary — as of 2026-07-28
+
+ADHERENCE
+Sessions logged in the last 7 days: 5 (target: 3-4/week).
+On target.
+
+FLAGS TO BRING UP WITH YOUR PHYSIO
+- Push Up Plus has been flagged for fatigue in 1 of your last 4 sessions (most recent 2026-07-28). Worth asking your physio whether this needs attention.
+
+NOTES YOU ADDED THIS WEEK:
+- 2026-07-27: Slept badly & rushed the whole thing — felt flat overall, not sore.
+Gym was packed, so the order was all over the place. Nothing to do with any one exercise.
+```
+The note appears under its date, as one sentence-for-sentence copy of what was typed — not condensed,
+not rephrased, not merged with the flags above it. Monthly captured the same way reads
+`NOTES YOU ADDED THIS MONTH:` and still carries the monthly-only TREND section after it.
+
+**5. Empty section omitted, not left as a bare header — ✅** After deleting the test session, the same
+weekly capture returned `generalNoteCount: 0` and the body goes straight from the FLAGS block to the
+end — **no `NOTES YOU ADDED THIS WEEK:` line at all.**
+
+**6. Cleanup — ✅** Both test sessions deleted. `rehab-sessions` back to exactly the five real dates it
+held before (`2026-07-21, 07-22, 07-23, 07-26, 07-28`), untouched. `tsc -b` clean, `oxlint` clean (no
+new warnings), `npm run build` succeeds.
+
+### CLAUDE.md — deliberately not touched
+Checked rather than assumed: this is **additive**, not a deviation. The locked spec enumerates the
+logging form's fields but nothing in it forbids another optional one; the Sessions table keeps its
+existing shape; the "Bedrock does judgment, Lambda does math" split is unaffected because this field
+enters neither half. The clinical boundary is *strengthened*, not bent — see the boundary check in D-27.
+No locked decision was overridden, so CLAUDE.md stands as written.
+
+### Artifacts changed
+- `src/log-session/handler.mjs`, `src/dashboard-data/handler.mjs`, `src/digest/handler.mjs`.
+- `web/src/lib/types.ts`, `web/src/lib/session-form.ts`, `web/src/views/LogSession.tsx`,
+  `web/src/views/Dashboard.tsx`.
+- `PROJECT_STATUS.md` — this section; new **D-27**.
+- No infra template changed, no new Lambda, no new stack, no CLAUDE.md change.

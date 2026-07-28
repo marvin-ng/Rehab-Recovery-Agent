@@ -8,7 +8,12 @@
 // Input body (JSON):
 //   { sessionDate, completedExercises: [ { exerciseId,
 //       sides: { left|right|n-a: { completed, rawNote } } } ],
-//     painRating, stiffnessRating, confidenceRating }
+//     painRating, stiffnessRating, confidenceRating, generalNote? }
+//
+// generalNote is the whole-session, non-exercise-specific note. It is stored
+// VERBATIM and is deliberately NEVER passed to the tagging Lambda — no tags, no
+// symptomType, no severity. It is not tied to an exercise or a side, so there is
+// nothing for the classifier to classify. See PROJECT_STATUS.md (D-27).
 //
 // AUTH: Function URL is AuthType NONE at the infra level; a shared-secret
 // header (x-api-key) is checked HERE, before any other processing.
@@ -91,6 +96,12 @@ function validate(payload) {
     }
   }
 
+  // Optional whole-session note. Absent is fine; present-but-not-a-string is not
+  // (same fail-loud discipline as every other field — no silent coercion).
+  if (payload.generalNote !== undefined && typeof payload.generalNote !== "string") {
+    return "generalNote must be a string when present";
+  }
+
   return null;
 }
 
@@ -162,6 +173,9 @@ export const handler = async (event = {}) => {
     painRating: payload.painRating,
     stiffnessRating: payload.stiffnessRating,
     confidenceRating: payload.confidenceRating,
+    // Stored exactly as typed. No trim, no tagging call, no tags array — this
+    // field never reaches rehab-tagging.
+    generalNote: payload.generalNote ?? "",
     loggedAt: new Date().toISOString(),
   };
 

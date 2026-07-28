@@ -65,6 +65,9 @@ export interface RecentSession {
   painRating: number;
   stiffnessRating: number;
   confidenceRating: number;
+  // Whole-session note, not tied to an exercise or side. Relayed verbatim and
+  // never tagged (D-27). "" for sessions logged before the field existed.
+  generalNote: string;
   exercises: Array<{
     exerciseId: string;
     sides: Partial<Record<Side, RecentSessionSide>>;
@@ -98,4 +101,5 @@ export interface LogSessionRequest {
   painRating: number;
   stiffnessRating: number;
   confidenceRating: number;
+  generalNote?: string;
 }

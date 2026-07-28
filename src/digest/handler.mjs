@@ -3,9 +3,16 @@
 //
 // Composes a therapist-ready plain-text summary from the pure Phase 3 logic:
 // adherence status, compiled escalations (observation + fixed physio question),
-// and — monthly only — the trend section. It REPORTS patterns only. It never
-// diagnoses, never explains why, never recommends (clinical boundary). All
-// wording comes from the Phase 3 templates, not from this file.
+// the verbatim general-notes relay, and — monthly only — the trend section. It
+// REPORTS patterns only. It never diagnoses, never explains why, never
+// recommends (clinical boundary). All wording comes from the Phase 3 templates,
+// not from this file.
+//
+// LOCKED DESIGN — the notes section is a VERBATIM RELAY ONLY (D-27). Each
+// session's generalNote is printed exactly as the user wrote it, under its date.
+// No model call, no summarisation, no rewording, no merging notes together. If a
+// future change proposes summarising this section, that is a deviation from a
+// locked decision and must be flagged, not silently added.
 
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { ddb, SESSIONS_TABLE, PROGRAM_TABLE, SESSION_PK, PROGRAM_PK } from "../lib/ddb.mjs";
@@ -49,8 +56,17 @@ async function queryProgram() {
   return Items;
 }
 
+// Pick out the sessions in the digest window that carry a general note, oldest
+// first. Whitespace-only counts as no note; the note text itself is untouched.
+function collectGeneralNotes(sessions) {
+  return sessions
+    .filter((s) => typeof s.generalNote === "string" && s.generalNote.trim().length > 0)
+    .map((s) => ({ sessionDate: s.sessionDate, generalNote: s.generalNote }))
+    .sort((a, b) => (a.sessionDate < b.sessionDate ? -1 : 1));
+}
+
 // Assemble the plain-text body. `trend` is null for weekly.
-function composeBody({ digestType, asOfDate, adherence, escalations, trend }) {
+function composeBody({ digestType, asOfDate, adherence, escalations, generalNotes, trend }) {
   const lines = [];
   const label = digestType === "monthly" ? "Monthly" : "Weekly";
   lines.push(`${label} rehab summary — as of ${asOfDate}`);
@@ -74,6 +90,17 @@ function composeBody({ digestType, asOfDate, adherence, escalations, trend }) {
     }
   }
 
+  // Notes you added — verbatim relay, one entry per dated note. Omitted
+  // entirely (no empty header) when no session in the window carries one.
+  if (generalNotes && generalNotes.length > 0) {
+    lines.push("");
+    lines.push(`NOTES YOU ADDED ${digestType === "monthly" ? "THIS MONTH" : "THIS WEEK"}:`);
+    for (const n of generalNotes) {
+      // Exactly as written — no rewording, no summarising, no combining.
+      lines.push(`- ${n.sessionDate}: ${n.generalNote}`);
+    }
+  }
+
   // Trend — monthly only
   if (trend) {
     lines.push("");
@@ -86,7 +113,7 @@ function composeBody({ digestType, asOfDate, adherence, escalations, trend }) {
   return lines.join("\n");
 }
 
-export { composeBody };
+export { composeBody, collectGeneralNotes };
 
 export const handler = async (event = {}) => {
   const digestType = event.digestType;
@@ -110,17 +137,32 @@ export const handler = async (event = {}) => {
   // Escalation scoping differs by cadence: weekly reports only new-this-week
   // flags (7-day session set) so a flag doesn't re-surface for four straight
   // weeks; monthly restates over the full window (a monthly roundup may repeat).
-  const escalationSessions =
+  // The general-notes section reads from this SAME set, so the "this week" /
+  // "this month" heading can't drift from the sessions it actually lists.
+  const cadenceSessions =
     digestType === "weekly"
       ? sessions.filter((s) => withinTrailingWindow(s.sessionDate, asOfDate, WEEK_DAYS))
       : sessions;
-  const escalations = compileEscalations(escalationSessions, asymmetry, asOfDate);
+  const escalations = compileEscalations(cadenceSessions, asymmetry, asOfDate);
+  const generalNotes = collectGeneralNotes(cadenceSessions);
 
   const trend = digestType === "monthly" ? computeTrend(sessions, asOfDate) : null;
 
   const subject = digestType === "monthly" ? "Monthly rehab summary" : "Weekly rehab summary";
-  const body = composeBody({ digestType, asOfDate, adherence, escalations, trend });
+  const body = composeBody({
+    digestType,
+    asOfDate,
+    adherence,
+    escalations,
+    generalNotes,
+    trend,
+  });
 
   await sendRehabEmail({ subject, body });
-  return { digestType, escalationCount: escalations.length, includedTrend: Boolean(trend) };
+  return {
+    digestType,
+    escalationCount: escalations.length,
+    generalNoteCount: generalNotes.length,
+    includedTrend: Boolean(trend),
+  };
 };

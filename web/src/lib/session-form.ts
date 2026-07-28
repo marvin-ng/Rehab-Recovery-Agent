@@ -14,6 +14,10 @@ export interface SessionFormState {
   pain: number;
   stiffness: number;
   confidence: number;
+  // Whole-session note, not tied to any one exercise. Lives here (not in
+  // LogSession) for the same reason as every other field: it must survive a
+  // tab switch. Optional — an empty string means "nothing to add".
+  generalNote: string;
   form: FormState;
 }
 
@@ -48,6 +52,7 @@ export function emptySessionForm(programItems: ProgramItem[]): SessionFormState 
     pain: 0,
     stiffness: 0,
     confidence: 5,
+    generalNote: "",
     form: emptyForm(programItems),
   };
 }
